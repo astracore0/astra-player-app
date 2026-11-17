@@ -130,12 +130,7 @@ public class MainActivity extends Activity {
 
             @Override
             public void onHideCustomView() {
-                if (customView == null) return;
-                root.removeView(customView);
-                customView = null;
-                if (customViewCallback != null) customViewCallback.onCustomViewHidden();
-                customViewCallback = null;
-                exitImmersive();
+                hideCustomView();
             }
 
             @Override
@@ -214,6 +209,22 @@ public class MainActivity extends Activity {
         if (offlinePanel != null) offlinePanel.setVisibility(View.GONE);
     }
 
+    // Activity-level fullscreen cleanup used by both WebChromeClient and Android Back.
+    private void hideCustomView() {
+        if (customView == null) return;
+
+        root.removeView(customView);
+        customView = null;
+
+        WebChromeClient.CustomViewCallback callback = customViewCallback;
+        customViewCallback = null;
+
+        exitImmersive();
+        if (callback != null) {
+            callback.onCustomViewHidden();
+        }
+    }
+
     private void enterImmersive() {
         getWindow().getDecorView().setSystemUiVisibility(
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
@@ -242,7 +253,7 @@ public class MainActivity extends Activity {
     @Override
     public void onBackPressed() {
         if (customView != null) {
-            onHideCustomView();
+            hideCustomView();
             return;
         }
         if (webView != null && webView.canGoBack()) {
