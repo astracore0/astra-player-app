@@ -14,11 +14,11 @@ const PORT = parseInt(process.env.PORT, 10) || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 
 app.disable('x-powered-by');
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '16mb' }));
 /* ---- Guests (friends opening this through a tunnel, e.g. Cloudflare) get their own profile + history and cannot change host settings ---- */
 const USERS_DIR = path.join(__dirname, 'users');
 const isGuestReq = (req) => !!(req.headers['cf-connecting-ip'] || req.headers['cf-ray'] || req.headers['x-forwarded-for'] || req.headers['forwarded']);
-const HOST_ONLY = [['POST', /^\/api\/settings\/root$/], ['GET', /^\/api\/ai\/online$/], ['POST', /^\/api\/ai\/online$/], ['POST', /^\/api\/thumbs\/clear$/], ['POST', /^\/api\/system\/hw-reset$/],
+const HOST_ONLY = [['POST', /^\/api\/settings\/root$/], ['GET', /^\/api\/ai\/online$/], ['POST', /^\/api\/ai\/online$/], ['POST', /^\/api\/thumbs\/clear$/], ['GET', /^\/api\/cache\/info$/], ['POST', /^\/api\/cache\/clear$/], ['POST', /^\/api\/restore$/], ['POST', /^\/api\/system\/hw-reset$/],
   ['POST', /^\/api\/tasks\/(stop|clear)$/], ['POST', /^\/api\/ai\/subs\/remove$/]];
 const guestStores = new Map();
 function guestStore(uid) {
@@ -48,6 +48,68 @@ app.use((req, res, next) => {
   if (HOST_ONLY.some(([m, re]) => m === req.method && re.test(req.path))) return res.status(403).json({ error: 'Only the owner of this server can do that', success: false });
   next();
 });
+
+
+const connectedClients = new Map();
+app.use((req, res, next) => {
+  const ip = String(req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.socket.remoteAddress || '')
+    .replace(/^::ffff:/, '').split(',')[0].trim();
+  if (ip) {
+    const ua = String(req.headers['user-agent'] || '');
+    let label = 'Web Device';
+    if (/smart-tv|smarttv|tizen|webos|bravia|android tv|aft|roku|chromecast|crkey/i.test(ua)) label = 'Smart TV / Cast';
+    else if (/android/i.test(ua)) label = 'Android Phone';
+    else if (/iphone|ipad/i.test(ua)) label = 'iPhone / iPad';
+    else if (/windows|macintosh|linux/i.test(ua)) label = 'PC / Laptop';
+    else if (/vlc|mpv|kodi|exoplayer/i.test(ua)) label = 'TV Media Player';
+    connectedClients.set(ip, {
+      ip,
+      label,
+      isSelf: ip === '127.0.0.1' || ip === '::1',
+      lastSeen: Date.now()
+    });
+  }
+  next();
+});
+
+app.get('/api/network/devices', async (req, res) => {
+  const now = Date.now();
+  const active = [];
+  connectedClients.forEach((v, k) => {
+    if (now - v.lastSeen < 15 * 60 * 1000) active.push(v);
+    else connectedClients.delete(k);
+  });
+
+  // Also check ARP table / local subnet neighbors on Android/Linux for nearby TVs
+  const nearby = [];
+  try {
+    const arp = fs.readFileSync('/proc/net/arp', 'utf8');
+    arp.split('\n').slice(1).forEach((line) => {
+      const cols = line.trim().split(/\s+/);
+      if (cols.length >= 4 && cols[0] && cols[2] !== '0x0' && cols[3] !== '00:00:00:00:00:00') {
+        if (!active.some((a) => a.ip === cols[0])) {
+          nearby.push({ ip: cols[0], mac: cols[3], label: 'Wi-Fi Device (TV / Host)' });
+        }
+      }
+    });
+  } catch (e) {}
+
+  res.json({ connected: active, nearby });
+});
+
+app.get('/api/network/info', (req, res) => {
+  const nets = os.networkInterfaces();
+  const ips = [];
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name] || []) {
+      if (net.family === 'IPv4' && !net.internal) {
+        ips.push({ iface: name, ip: net.address, url: `http://${net.address}:${PORT}` });
+      }
+    }
+  }
+  res.json({ port: PORT, urls: ips });
+});
+
 app.get('/api/whoami', (req, res) => res.json({ guest: !!req.guest }));
 
 
@@ -232,6 +294,16 @@ function getLibrary(force = false) {
   return data;
 }
 
+
+app.get('/api/descriptions', (req, res) => {
+  try {
+    const data = fs.readFileSync(path.join(__dirname, 'descriptions.json'), 'utf-8');
+    res.type('application/json').send(data);
+  } catch (e) {
+    res.json({});
+  }
+});
+
 app.get('/api/library', (req, res) => {
   res.json({ root: MEDIA_ROOT, library: getLibrary(req.query.refresh === '1') });
 });
@@ -298,9 +370,59 @@ app.post('/api/settings/root', (req, res) => {
 /* ------------------------------------------------------------------ */
 /* Metadata (ffprobe)                                                  */
 /* ------------------------------------------------------------------ */
-const metaCache = new Map();   // ffprobe results: reopening an episode (or the next one, prefetched) is instant
+const metaCache = new Map();
+metaCache.clear();   // ffprobe results: reopening an episode (or the next one, prefetched) is instant
 const LITE_HOST = os.totalmem() < 3e9;          // small phone: keep caches small
 function metaCacheSet(k, v) { if (metaCache.size > (LITE_HOST ? 40 : 300)) metaCache.delete(metaCache.keys().next().value); metaCache.set(k, v); }
+
+
+function applySmartChapterNames(filePath, chapters) {
+  if (!Array.isArray(chapters) || !chapters.length) return chapters;
+  let mapData = {};
+  try {
+    mapData = JSON.parse(fs.readFileSync(path.join(__dirname, 'chapters_map.json'), 'utf-8'));
+  } catch (e) {}
+
+  const parsed = parseMediaName(path.basename(filePath));
+  const normTitle = (parsed.title || '').toLowerCase();
+  const seriesKey = Object.keys(mapData).find((k) => normTitle.includes(k.toLowerCase()));
+  const sKey = String(parsed.season || 1);
+  const epKey = parsed.ep != null ? String(parsed.ep) : '';
+  const epNode = seriesKey && mapData[seriesKey] && mapData[seriesKey][sKey] && mapData[seriesKey][sKey][epKey];
+  const customNames = Array.isArray(epNode) ? epNode : (epNode && epNode[String(chapters.length)]);
+
+  return chapters.map((c, idx) => {
+    const raw = String(c.title || '').trim();
+    const stripped = raw.replace(/^\d+\s*[•·\-]\s*/, '').trim();
+    const isGeneric = !stripped || /^chapter\s*0*\d+$/i.test(stripped);
+    let label = stripped;
+
+    if (isGeneric) {
+      if (customNames && customNames[idx]) {
+        label = customNames[idx];
+      } else {
+        const dur = (c.end || 0) - (c.start || 0);
+        if (idx === 0 && dur > 0 && dur <= 130 && chapters.length >= 3) {
+          label = c.start < 15 ? 'Opening' : 'Prologue';
+        } else if (idx === 1 && dur >= 75 && dur <= 115 && chapters.length >= 4) {
+          label = 'Opening';
+        } else if (idx === chapters.length - 1 && dur > 0 && dur <= 40 && chapters.length >= 3) {
+          label = 'Preview';
+        } else if ((idx === chapters.length - 1 || idx === chapters.length - 2) && dur >= 75 && dur <= 115 && chapters.length >= 3) {
+          label = 'Ending';
+        } else {
+          label = `Part ${String.fromCharCode(65 + Math.min(idx, 25))}`;
+        }
+      }
+    }
+
+    return {
+      ...c,
+      title: `${idx + 1} • ${label}`
+    };
+  });
+}
+
 app.get('/api/video/metadata', (req, res) => {
   const r = resolveFile(req.query.file, VIDEO_EXTS);
   if (r.error) return res.status(r.status).json({ error: r.error });
@@ -325,6 +447,7 @@ app.get('/api/video/metadata', (req, res) => {
       const audioTracks = [];
       const subtitleTracks = [];
       let is10BitHevc = false;
+      let videoFps = 0;
       let duration = parseFloat(info.format && info.format.duration) || 0;
       const chapters = (info.chapters || []).map((c, i) => ({
         start: parseFloat(c.start_time) || 0,
@@ -340,6 +463,8 @@ app.get('/api/video/metadata', (req, res) => {
         if (s.codec_type === 'video') {
           if (s.disposition && s.disposition.attached_pic) return; // cover art
           if (!duration && s.duration) duration = parseFloat(s.duration) || 0;
+          const rParts = String(s.avg_frame_rate || s.r_frame_rate || '').split('/');
+          if (rParts.length === 2 && Number(rParts[1]) > 0) videoFps = Math.round(Number(rParts[0]) / Number(rParts[1]));
           const pix = s.pix_fmt || '';
           if (pix.includes('10le') || pix.includes('10be') || pix.includes('yuv420p10')) {
             is10BitHevc = true;
@@ -363,7 +488,8 @@ app.get('/api/video/metadata', (req, res) => {
         }
       });
 
-      const out = { audioTracks, subtitleTracks, is10BitHevc, duration, chapters, size: r.stat.size };
+      const smartChapters = applySmartChapterNames(r.path, chapters);
+      const out = { audioTracks, subtitleTracks, is10BitHevc, videoFps, duration, chapters: smartChapters, size: r.stat.size };
       if (duration > 0) metaCacheSet(mkey, out);
       res.json(out);
       prefetchSubtitles(r, subtitleTracks); // background, instant subtitles later
@@ -881,6 +1007,11 @@ app.get('/api/subs/file', (req, res) => {
 let activeTranscodeProc = null;
 let isTranscodeFrozen = false;
 let frozenSince = 0;
+let activeTranscodeSid = '';
+function sidMismatch(req) {
+  const sid = String(req.query.sid || '').slice(0, 40);
+  return !!(sid && activeTranscodeSid && sid !== activeTranscodeSid);
+}
 
 function killTranscode() {
   if (activeTranscodeProc) {
@@ -896,7 +1027,8 @@ function transcodeIsLive() {
 }
 
 app.post('/api/stream/pause', (req, res) => {
-  if (transcodeIsLive() && !isTranscodeFrozen) {
+  if (sidMismatch(req)) return res.json({ status: 'ignored' }); // pause-sid-check
+  if (transcodeIsLive() && !isTranscodeFrozen && !(activeTcJob && activeTcJob.caching())) {   // a caching conversion keeps running while paused
     try {
       activeTranscodeProc.kill('SIGSTOP');
       isTranscodeFrozen = true;
@@ -907,6 +1039,7 @@ app.post('/api/stream/pause', (req, res) => {
 });
 
 app.post('/api/stream/resume', (req, res) => {
+  if (sidMismatch(req)) return res.json({ status: 'ignored' }); // resume-sid-check
   if (transcodeIsLive() && isTranscodeFrozen) {
     try {
       activeTranscodeProc.kill('SIGCONT');
@@ -948,8 +1081,17 @@ app.get('/api/video/keyframe', (req, res) => {
 let HW_ENCODER = null;
 let hwDisabled = false;
 const HW_FLAG = path.join(CACHE_DIR, 'hw_disabled');
-try { hwDisabled = fs.existsSync(HW_FLAG); } catch (e) {}
+const HW_STRIKES_MAX = 2;                       // failed hardware starts in a row before it is switched off
+const HW_START_MS = 10000;                      // cold start of a phone encoder can be slow
+const HW_DISABLE_TTL_MS = 6 * 3600 * 1000;      // a disabled flag expires, hardware is retried later
+let hwStrikes = 0;
+try {
+  const st = fs.statSync(HW_FLAG);
+  if (Date.now() - st.mtimeMs > HW_DISABLE_TTL_MS) fs.unlinkSync(HW_FLAG); else hwDisabled = true;
+} catch (e) {}
 function disableHwEncoder() {
+  hwStrikes++;
+  if (hwStrikes < HW_STRIKES_MAX) { log('SYSTEM', `Hardware encoder strike ${hwStrikes}/${HW_STRIKES_MAX} (software used for this stream)`); return; }
   HW_ENCODER = null; hwDisabled = true;
   try { fs.writeFileSync(HW_FLAG, String(Date.now())); } catch (e) {}
 }
@@ -970,7 +1112,7 @@ app.get('/api/system/capabilities', (req, res) => {
   res.json({ hwEncoder: HW_ENCODER, hwDisabled, cores: numCoresEarly, lowEnd: false });
 });
 app.post('/api/system/hw-reset', (req, res) => {
-  hwDisabled = false;
+  hwDisabled = false; hwStrikes = 0;
   try { fs.unlinkSync(HW_FLAG); } catch (e) {}
   execFile('ffmpeg', ['-hide_banner', '-encoders'], { timeout: 15000, maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
     if (!err && /\bh264_mediacodec\b/.test(out)) HW_ENCODER = 'h264_mediacodec';
@@ -985,6 +1127,7 @@ const QUALITY = {
   balanced: { height: 720, crf: 28, preset: 'ultrafast', hwBitrate: '3000k' },
   quality:  { height: 720, crf: 23, preset: 'veryfast',  hwBitrate: '5000k' },
   fhd:      { height: 1080, crf: 25, preset: 'veryfast', hwBitrate: '8000k' },
+  qhd:      { height: 1440, crf: 26, preset: 'veryfast', hwBitrate: '12000k' },
   uhd:      { height: 2160, crf: 26, preset: 'veryfast', hwBitrate: '18000k' }
 };
 
@@ -1021,9 +1164,119 @@ function buildFfmpegArgs({ file, seekSec, audioTrack, transcodeVideo, quality, h
   return a;
 }
 
+const COALESCE_BYTES = 128 * 1024, COALESCE_MS = 120;
 let transcodeJobId = 0;
 let transcodeStats = { speed: 0, fps: 0, at: 0, job: 0, quality: '', height: 0 };
 app.get('/api/transcode/stats', (req, res) => res.json({ ...transcodeStats, active: !!activeTranscodeProc, frozen: isTranscodeFrozen, age: transcodeStats.at ? Date.now() - transcodeStats.at : null }));
+
+/* Transcode cache: the transcoded MP4 is written to disk while it streams. When ffmpeg finishes
+   cleanly the file is kept, so reloading the same video/position/audio/quality is served straight
+   from disk (no ffmpeg). If the player is closed or reloaded mid-transcode, ffmpeg keeps going in the
+   background and the new request re-attaches to it. Size is capped (ASTRA_TC_CACHE_MB, default 1536). */
+const TC_DIR = path.join(CACHE_DIR, 'transcode');
+try { fs.mkdirSync(TC_DIR, { recursive: true }); } catch (e) {}
+const TC_MAX_BYTES = (parseInt(process.env.ASTRA_TC_CACHE_MB, 10) || 1536) * 1024 * 1024;
+const TC_FILE_MAX_BYTES = Math.floor(TC_MAX_BYTES * 0.6);
+const TC_ENABLED = !process.env.ASTRA_NO_TC_CACHE;
+try { for (const f of fs.readdirSync(TC_DIR)) if (f.endsWith('.part')) fs.unlinkSync(path.join(TC_DIR, f)); } catch (e) {}   // leftovers from a crash
+enforceCacheQuota(TC_DIR, TC_MAX_BYTES);
+let activeTcJob = null;   // { key, attach(res), caching() }
+
+function tcKey(r, p) {
+  // "<hash of file+audio+quality>_<start in ms>": one finished run covers every start at or after its own start
+  const base = require('crypto').createHash('sha1')
+    .update([r.path, r.stat.size, Math.floor(r.stat.mtimeMs), p.audioTrack, p.transcodeVideo ? 1 : 0, p.quality].join('|'))
+    .digest('hex').slice(0, 20);
+  return `${base}_${Math.round(p.seekSec * 1000)}`;
+}
+
+// Finished run for this file/audio/quality that started at or before t (seconds). Latest start wins.
+function tcFind(base, t) {
+  let best = null;
+  try {
+    for (const f of fs.readdirSync(TC_DIR)) {
+      const m = /^([0-9a-f]+)_(\d+)\.mp4$/.exec(f);
+      if (!m || m[1] !== base) continue;
+      const start = parseInt(m[2], 10) / 1000;
+      if (start <= t + 0.001 && (!best || start > best.start)) best = { file: path.join(TC_DIR, f), start };
+    }
+  } catch (e) {}
+  return best;
+}
+
+function tcProbeKeyframe(file, t, cb) {
+  const probe = (win, done) => {
+    execFile('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-skip_frame', 'nokey', '-show_entries', 'frame=pts_time,pkt_pts_time',
+      '-of', 'csv=p=0', '-read_intervals', `${Math.max(0, t - win)}%${t + 0.05}`, file],
+    { maxBuffer: 4 * 1024 * 1024, timeout: 20000 }, (err, out) => {
+      const times = String(out || '').split('\n').map((l) => parseFloat(l.split(',').find((x) => x !== '' && !isNaN(parseFloat(x)))))
+        .filter((x) => Number.isFinite(x) && x <= t + 0.05);
+      done(times.length ? Math.max(...times) : null);
+    });
+  };
+  probe(30, (k) => (k !== null ? cb(k) : probe(300, (k2) => cb(k2 !== null ? k2 : 0))));
+}
+
+// The player asks first: "is there a saved conversion for this position, and where does it really start?"
+// Copy-mode can only start on a keyframe, so the player snaps its clock to the returned time (subtitles stay exact).
+app.get('/api/transcode/cache-start', (req, res) => {
+  if (!TC_ENABLED) return res.json({ hit: false });
+  const r = resolveFile(req.query.file, VIDEO_EXTS);
+  if (r.error) return res.json({ hit: false });
+  const audioTrack = String(req.query.audioTrack || '0:a:0');
+  const quality = QUALITY[req.query.q] ? req.query.q : 'balanced';
+  const t = Math.max(0, parseFloat(req.query.t) || 0);
+  const base = tcKey(r, { audioTrack, transcodeVideo: true, quality, seekSec: 0 }).split('_')[0];
+  const seg = tcFind(base, t);
+  if (!seg) return res.json({ hit: false });
+  const rel = t - seg.start;
+  if (rel < 0.05) return res.json({ hit: true, time: seg.start });
+  tcProbeKeyframe(seg.file, rel, (k) => res.json({ hit: true, time: seg.start + k }));
+});
+
+// Play from a finished run at any position without re-encoding: copy the already converted video from there.
+function serveCachedFrom(res, seg, seekSec, sid, quality) {
+  killTranscode();
+  activeTranscodeSid = sid;
+  const jobId = ++transcodeJobId;
+  try { const now = new Date(); fs.utimesSync(seg.file, now, now); } catch (e) {}
+  res.writeHead(200, { 'Content-Type': 'video/mp4', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
+  res.on('error', () => {});
+  const rel = Math.max(0, seekSec - seg.start) + 0.02;
+  const p = spawn('ffmpeg', ['-v', 'error', '-nostdin', '-ss', rel.toFixed(3), '-i', seg.file, '-map', '0', '-c', 'copy',
+    '-avoid_negative_ts', 'make_zero', '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov+default_base_moof+negative_cts_offsets', '-'],
+  { stdio: ['ignore', 'pipe', 'pipe'] });
+  activeTranscodeProc = p; isTranscodeFrozen = false;
+  transcodeStats = { speed: 9.9, fps: 0, at: Date.now(), job: jobId, quality, height: QUALITY[quality].height };
+  p.stderr.resume(); p.stdout.on('error', () => {});
+  p.stdout.pipe(res);
+  p.on('close', () => { if (p === activeTranscodeProc) { activeTranscodeProc = null; isTranscodeFrozen = false; } });
+  res.on('close', () => { try { p.kill('SIGKILL'); } catch (e) {} });
+  log('SYSTEM', `Playing converted video from the cache (from ${seekSec.toFixed(1)}s)`);
+}
+
+function serveCachedTranscode(req, res, file) {
+  let size;
+  try { size = fs.statSync(file).size; } catch (e) { return false; }
+  if (!size) return false;
+  let start = 0, end = size - 1, status = 200;
+  const m = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range || ''));
+  if (m && (m[1] || m[2])) {
+    if (m[1]) { start = parseInt(m[1], 10); if (m[2]) end = Math.min(end, parseInt(m[2], 10)); }
+    else { start = Math.max(0, size - parseInt(m[2], 10)); }
+    if (start > end || start >= size) { res.writeHead(416, { 'Content-Range': `bytes */${size}` }); res.end(); return true; }
+    status = 206;
+  }
+  const h = { 'Content-Type': 'video/mp4', 'Cache-Control': 'no-cache', 'Accept-Ranges': 'bytes', 'Content-Length': end - start + 1 };
+  if (status === 206) h['Content-Range'] = `bytes ${start}-${end}/${size}`;
+  res.writeHead(status, h);
+  const now = new Date(); fs.utimes(file, now, now, () => {});   // LRU: recently used stays
+  const rs = fs.createReadStream(file, { start, end });
+  rs.on('error', () => res.destroy());
+  res.on('close', () => rs.destroy());
+  rs.pipe(res);
+  return true;
+}
 
 // Robust Transcoder: handles Opus, AAC, FLAC, AC3 without audio pipe freeze
 app.get('/stream/transcode', (req, res) => {
@@ -1035,11 +1288,39 @@ app.get('/stream/transcode', (req, res) => {
   const transcodeVideo = req.query.is10Bit === '1';
   const seekSec = Math.max(0, parseFloat(req.query.startTime) || 0);
   const quality = QUALITY[req.query.q] ? req.query.q : 'balanced';
+  const sid = String(req.query.sid || '').slice(0, 40);
+  /* sid-param */
   const hwWanted = transcodeVideo && !!HW_ENCODER && req.query.enc === 'hw';
 
   markInteractive(20000);
   try { req.socket.setNoDelay(true); } catch (e) {}
+
+  const key = (TC_ENABLED && transcodeVideo) ? tcKey(r, { audioTrack, transcodeVideo, quality, seekSec }) : '';   // only converted (10-bit) video is cached
+  const finalFile = path.join(TC_DIR, `${key}.mp4`);
+  const partFile = path.join(TC_DIR, `${key}.part`);
+
+  // 1) Already converted earlier: serve from disk (exact same start), or copy from a finished run that started earlier.
+  if (key) {
+    if (fs.existsSync(finalFile)) {
+      killTranscode();
+      activeTranscodeSid = sid;
+      res.on('error', () => {});
+      if (serveCachedTranscode(req, res, finalFile)) return;
+    }
+    const seg = tcFind(key.split('_')[0], seekSec);
+    if (seg) return serveCachedFrom(res, seg, seekSec, sid, quality);
+  }
+
+  // 2) Same stream is still being transcoded in the background (reload / reopen): re-attach to it.
+  if (key && activeTcJob && activeTcJob.key === key && transcodeIsLive()) {
+    activeTranscodeSid = sid;
+    activeTranscodeFile = req.query.file ? String(req.query.file) : '';
+    res.on('error', () => {});
+    if (activeTcJob.attach(res)) return;
+  }
+
   killTranscode();
+  activeTranscodeSid = sid;
   const jobId = ++transcodeJobId;
   activeTranscodeFile = req.query.file ? String(req.query.file) : '';
 
@@ -1051,12 +1332,32 @@ app.get('/stream/transcode', (req, res) => {
   res.on('error', () => {});
 
   let bytesOut = 0;
+  let out = res;                 // current client (null once the player went away; ffmpeg keeps filling the cache)
+  let fd = null, fileBytes = 0, cacheOk = !!key;
+  let behind = false, sent = 0, rfd = null, pendingEnd = false;   // behind: the player lags, the file holds what it still needs
+  const closePart = () => { if (fd !== null) { try { fs.closeSync(fd); } catch (e) {} fd = null; } };
+  const closeRfd = () => { if (rfd !== null) { try { fs.closeSync(rfd); } catch (e) {} rfd = null; } };
+  const dropPart = () => { closePart(); closeRfd(); cacheOk = false; try { fs.unlinkSync(partFile); } catch (e) {} };
+  const openPart = () => {
+    if (!cacheOk) return;
+    closePart(); fileBytes = 0;
+    try { fd = fs.openSync(partFile, 'w'); } catch (e) { cacheOk = false; }
+  };
+  const writePart = (buf) => {
+    if (!cacheOk || fd === null) return;
+    try {
+      fs.writeSync(fd, buf); fileBytes += buf.length;
+      if (fileBytes > TC_FILE_MAX_BYTES && !behind) { log('SYSTEM', 'Transcode too large for the cache, streaming without saving'); dropPart(); }
+    } catch (e) { dropPart(); }
+  };
 
   const launch = (hw, legacy) => {
     const args = buildFfmpegArgs({ file: r.path, seekSec, audioTrack, transcodeVideo, quality, hw, legacy });
     // stderr MUST be drained: an unread pipe fills up (~64 KB) and freezes ffmpeg.
     const ffmpeg = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe', 'pipe'] });
     activeTranscodeProc = ffmpeg;
+    bytesOut = 0; sent = 0; behind = false; pendingEnd = false; closeRfd();
+    openPart();
     transcodeStats = { speed: 0, fps: 0, at: 0, job: jobId, quality, height: QUALITY[quality].height };
     if (ffmpeg.stdio[3]) {
       ffmpeg.stdio[3].on('error', () => {});
@@ -1075,68 +1376,168 @@ app.get('/stream/transcode', (req, res) => {
     if (hw) {
       // A hardware encoder that hangs (no error, no output) must not freeze playback: give up after 7 s.
       hwWatch = setTimeout(function check() {
-        if (superseded || bytesOut > 0 || ffmpeg !== activeTranscodeProc || res.destroyed) return;
+        if (superseded || bytesOut > 0 || ffmpeg !== activeTranscodeProc || (out && out.destroyed)) return;
         if (isTranscodeFrozen) { hwWatch = setTimeout(check, 3000); return; }
-        log('SYSTEM', `Hardware encoder ${hw} produced no output, disabling it and using software x264`);
+        log('SYSTEM', `Hardware encoder ${hw} produced no output, using software x264 for this stream`);
         disableHwEncoder();
         superseded = true;
         try { ffmpeg.kill('SIGKILL'); } catch (e) {}
         launch(null, legacy);
-      }, 7000);
+      }, HW_START_MS);
     }
 
     let errTail = '';
     ffmpeg.stderr.on('data', (c) => { errTail = (errTail + c.toString()).slice(-600); });
     ffmpeg.stdout.on('error', () => {});
-    ffmpeg.stdout.on('data', (c) => { bytesOut += c.length; });
-    ffmpeg.stdout.pipe(res, { end: false });
+    ffmpeg.stdout.on('data', (c) => { if (hw && bytesOut === 0) hwStrikes = 0; bytesOut += c.length; });
+    // Send the video in bigger blocks (128 KB or every 120 ms) instead of one tiny packet per ffmpeg write.
+    // Many tiny packets keep the phone's network stack busy; a tunnel merges them by itself, localhost does not.
+    // Every block goes to the disk cache and (if a player is connected) to the player.
+    let pend = [], pendBytes = 0, pendTimer = null;
+    // When the player is slower than ffmpeg (paused, buffer full, tunnel hiccup) ffmpeg must NOT wait for it:
+    // the file on disk is the buffer, and catchUp() sends what the player missed once it is ready again.
+    const flushOut = () => {
+      clearTimeout(pendTimer); pendTimer = null;
+      if (!pendBytes) return;
+      const buf = Buffer.concat(pend, pendBytes); pend = []; pendBytes = 0;
+      if (superseded) return;
+      writePart(buf);
+      const o = out;
+      if (!o || o.destroyed) return;
+      if (behind) return;
+      const ok = o.write(buf);
+      sent += buf.length;
+      if (ok === false) {
+        // open the file for reading NOW: when ffmpeg finishes first, the file gets renamed into the cache
+        if (cacheOk && fd !== null && rfd === null) { try { rfd = fs.openSync(partFile, 'r'); } catch (e) {} }
+        if (cacheOk && rfd !== null) { behind = true; o.once('drain', catchUp); }
+        else { ffmpeg.stdout.pause(); o.once('drain', () => { try { ffmpeg.stdout.resume(); } catch (e) {} }); }
+      }
+    };
+    const catchUp = () => {
+      const o = out;
+      if (!behind || !o || o.destroyed) return;
+      if (rfd === null) {
+        try { rfd = fs.openSync(partFile, 'r'); }
+        catch (e) { try { rfd = fs.openSync(finalFile, 'r'); } catch (e2) { behind = false; try { o.destroy(); } catch (e3) {} return; } }
+      }
+      const step = () => {
+        if (out !== o || o.destroyed) { closeRfd(); return; }
+        const total = fileBytes;
+        if (sent >= total) {
+          behind = false; closeRfd();
+          if (pendingEnd) { try { o.end(); } catch (e) {} }
+          return;
+        }
+        const len = Math.min(total - sent, 256 * 1024), b = Buffer.allocUnsafe(len);
+        fs.read(rfd, b, 0, len, sent, (err, n) => {
+          if (err || !n) { behind = false; closeRfd(); try { o.destroy(); } catch (e) {} return; }
+          sent += n;
+          if (o.write(n === len ? b : b.subarray(0, n)) === false) o.once('drain', step); else setImmediate(step);
+        });
+      };
+      step();
+    };
+    ffmpeg.stdout.on('data', (c) => {
+      pend.push(c); pendBytes += c.length;
+      if (pendBytes >= COALESCE_BYTES) flushOut();
+      else if (!pendTimer) pendTimer = setTimeout(flushOut, COALESCE_MS);
+    });
+
+    // Player re-opened the same stream: replay what is already on disk, then continue live.
+    const job = activeTcJob = {
+      key,
+      caching: () => cacheOk,
+      attach: (newRes) => {
+        if (!cacheOk || fd === null || ffmpeg !== activeTranscodeProc) return false;
+        newRes.writeHead(200, { 'Content-Type': 'video/mp4', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
+        const old = out; out = null; behind = false; closeRfd();
+        if (old && old !== newRes) { try { old.destroy(); } catch (e) {} }
+        ffmpeg.stdout.pause();
+        flushOut();                                   // everything produced so far is now in the file
+        const upTo = fileBytes;
+        const finishAttach = () => { out = newRes; behind = false; sent = upTo; hookClose(newRes); try { ffmpeg.stdout.resume(); } catch (e) {} if (isTranscodeFrozen) { try { ffmpeg.kill('SIGCONT'); isTranscodeFrozen = false; } catch (e) {} } };
+        if (!upTo) { finishAttach(); return true; }
+        const rs = fs.createReadStream(partFile, { start: 0, end: upTo - 1 });
+        rs.on('error', () => { try { newRes.destroy(); } catch (e) {} });
+        newRes.on('close', () => rs.destroy());
+        rs.on('end', finishAttach);
+        rs.pipe(newRes, { end: false });
+        return true;
+      }
+    };
 
     ffmpeg.on('error', (e) => {
       log('ERROR', `ffmpeg failed to start: ${e.message}`);
       if (ffmpeg === activeTranscodeProc) activeTranscodeProc = null;
-      res.end();
+      if (activeTcJob === job) activeTcJob = null;
+      flushOut(); dropPart();
+      if (out) out.end();
     });
 
     ffmpeg.on('close', (code, signal) => {
       clearTimeout(hwWatch);
       if (superseded) return;
       const failedEarly = code && !signal && bytesOut === 0;
-      if (failedEarly && hw && ffmpeg === activeTranscodeProc && !res.destroyed) {
-        log('SYSTEM', `Hardware encoder ${hw} failed to start, falling back to software x264`);
+      if (failedEarly && hw && ffmpeg === activeTranscodeProc && !(out && out.destroyed)) {
+        log('SYSTEM', `Hardware encoder ${hw} failed to start, using software x264 for this stream`);
         disableHwEncoder();
         return launch(null, legacy);
       }
-      if (failedEarly && !hw && !legacy && ffmpeg === activeTranscodeProc && !res.destroyed) {
+      if (failedEarly && !hw && !legacy && ffmpeg === activeTranscodeProc && !(out && out.destroyed)) {
         log('SYSTEM', `ffmpeg fast-start failed (${errTail.trim().split('\n').pop() || 'exit ' + code}), retrying with plain arguments`);
         return launch(null, true);
       }
       if (code && !signal && errTail.trim()) {
         log('ERROR', `ffmpeg exited ${code} (${path.basename(r.path)}): ${errTail.trim().split('\n').pop()}`);
       }
-      if (ffmpeg === activeTranscodeProc) {
+      const wasActive = ffmpeg === activeTranscodeProc;
+      if (wasActive) {
         activeTranscodeProc = null;
         isTranscodeFrozen = false;
       }
-      res.end();
+      if (activeTcJob === job) activeTcJob = null;
+      flushOut();
+      // Only a complete, clean run becomes a reusable cache entry; killed/failed runs leave nothing behind.
+      if (cacheOk && code === 0 && !signal && fileBytes > 0) {
+        closePart();
+        try {
+          fs.renameSync(partFile, finalFile);
+          // this finished run covers everything from its start on: older-start-later copies of the same video are redundant
+          const base = key.split('_')[0];
+          for (const f of fs.readdirSync(TC_DIR)) {
+            const m = /^([0-9a-f]+)_(\d+)\.mp4$/.exec(f);
+            if (m && m[1] === base && parseInt(m[2], 10) / 1000 > seekSec + 0.001) { try { fs.unlinkSync(path.join(TC_DIR, f)); } catch (e) {} }
+          }
+          enforceCacheQuota(TC_DIR, TC_MAX_BYTES);
+        } catch (e) { dropPart(); }
+      } else dropPart();
+      if (out) { if (behind) pendingEnd = true; else { try { out.end(); } catch (e) {} } }
     });
   };
 
-  launch(hwWanted ? HW_ENCODER : null);
-
-  // Client went away: keep the process briefly (a seek may reconnect), then reap it.
-  // A paused (frozen) stream is kept longer, but never forever.
-  res.on('close', () => {
-    if (res.writableFinished) return;
+  // Client went away (stop / reload / navigate): keep ffmpeg running in the background so the whole
+  // transcode lands in the cache and a reload re-attaches or plays from disk. It is only reaped when
+  // caching is off or has been given up, when something else supersedes it (a new request calls
+  // killTranscode), when the user stops it in the task list, or when it stays frozen for 10 minutes.
+  const hookClose = (theRes) => theRes.on('close', () => {
+    if (theRes.writableFinished) return;
+    if (out === theRes) { out = null; behind = false; closeRfd(); try { if (activeTranscodeProc) activeTranscodeProc.stdout.resume(); } catch (e) {} }
+    else if (out) return;                                    // another player has taken over
+    if (jobId !== transcodeJobId) return;
     const reap = () => {
-      if (jobId !== transcodeJobId) return;
-      if (isTranscodeFrozen && Date.now() - frozenSince < 10 * 60 * 1000) {
-        setTimeout(reap, 60 * 1000);
-        return;
+      if (jobId !== transcodeJobId || out) return;
+      if (isTranscodeFrozen && Date.now() - frozenSince < 10 * 60 * 1000) { setTimeout(reap, 60 * 1000); return; }
+      if (!cacheOk) { killTranscode(); return; }
+      if (isTranscodeFrozen) {                                // paused then left: let it finish in the background
+        try { activeTranscodeProc.kill('SIGCONT'); isTranscodeFrozen = false; } catch (e) {}
       }
-      killTranscode();
     };
-    setTimeout(reap, 12000);
+    setTimeout(reap, cacheOk ? 1000 : 12000);
   });
+  hookClose(res);
+
+  launch(hwWanted ? HW_ENCODER : null);
 });
 
 
@@ -1320,7 +1721,7 @@ function aiFinish(job, state, msg) {
   job.state = state; job.msg = msg || ''; job.proc = null;
   if (state === 'done') {
     job.pct = 100;
-    aiIndex[job.key] = { name: job.exportName || niceSubName(job.relPath, job.mode), mode: job.mode || 'ai', path: job.path, size: job.sig && job.sig.size, mtimeMs: job.sig && job.sig.mtimeMs, audioTrack: job.audioTrack, lang: job.lang, translate: !!job.translate, songs: !!job.songs, model: job.model, lines: job.cues ? job.cues.length : 0, created: Date.now() };
+    aiIndex[job.key] = { name: job.exportName || niceSubName(job.relPath, job.mode), mode: job.mode || 'ai', path: job.path, size: job.sig && job.sig.size, mtimeMs: job.sig && job.sig.mtimeMs, audioTrack: job.audioTrack, lang: job.lang, translate: !!job.translate, songs: !!job.songs, model: job.model, lines: job.cues ? job.cues.length : 0, last: job.last || '', created: Date.now() };
     aiIndexSave();
   }
   try { if (job.wav) fs.unlinkSync(job.wav); } catch (e) {}
@@ -1622,7 +2023,7 @@ async function onlineTranscribe(wavFile, job) {
     try {
       r = await fetch(c.base + (toEn ? '/audio/translations' : '/audio/transcriptions'), { method: 'POST', headers: { Authorization: 'Bearer ' + c.key }, body: fd, signal: AbortSignal.timeout(120000) });
     } catch (e) {
-      if (attempt === 3) throw new Error('Online AI is not reachable (' + (e.name === 'TimeoutError' ? 'timed out' : 'network error') + ')');
+      if (attempt === 3) throw new Error('Online AI is not reachable (' + (e.name === 'TimeoutError' ? 'timed out' : (e.cause && e.cause.code ? e.cause.code : e.message || 'network error')) + ')');
       await new Promise((ok) => setTimeout(ok, 1500 * (attempt + 1))); continue;
     }
     if (r.status === 401 || r.status === 403) throw new Error('The API key was rejected. Check it in Settings > Subtitles');
@@ -1661,7 +2062,7 @@ async function aiRun(job) {
   const channels = await aiChannels(job.path, job.audioTrack);
   job.centre = channels >= 5;                     // 5.1 / 7.1: dialogue lives on the centre channel
   const GATE = !job.songs && !(savedConfig.whisper && savedConfig.whisper.gate === false);
-  const CH = Math.max(20, Number(process.env.ASTRA_AI_CHUNK_SEC) || 120);
+  const CH = job.online ? 180 : Math.max(20, Number(process.env.ASTRA_AI_CHUNK_SEC) || 120);
   // Chunk list: whole episode minus opening/ending/credits chapters (music, nothing to transcribe).
   const skip = job.songs ? [] : await aiSkipRanges(job.path);
   const list = [];
@@ -1675,7 +2076,7 @@ async function aiRun(job) {
   job.chunks = list.length;
   job.workDir = path.join(AI_DIR, `${job.key}.work`);
   try { fs.mkdirSync(job.workDir, { recursive: true }); } catch (e) {}
-  job.cues = []; job.chunk = 1; job.doneSec = 0; job.totalSec = list.reduce((n, c) => n + c.len, 0); job.startedAt = Date.now(); job.state = 'transcribing'; job.pct = 0.5;
+  job.cues = []; job.chunk = 1; job.doneSec = 0; job.totalSec = list.reduce((n, c) => n + c.len, 0); job.startedAt = Date.now(); job.state = 'extracting'; job.pct = 0.5;
   const alive = () => job.state !== 'cancelled';
   const publishPartial = () => { try { fs.writeFileSync(aiPartFile(job.key), cuesToVtt(job.cues), 'utf-8'); } catch (e) {} };
 
@@ -1691,7 +2092,7 @@ async function aiRun(job) {
   const cores = os.cpus().length;
   const bigModel = !/tiny/i.test(job.model);
   let workers = Number(savedConfig.whisper && savedConfig.whisper.parallel) || (cores >= 6 && !(bigModel && os.totalmem() < 3e9) ? 2 : 1);
-  if (job.online) workers = 3;                                  // the API does the heavy lifting: send a few slices at once
+  if (job.online) workers = 1;                                  // sequential 3-min chunks avoid Groq 25MB/rate-limit network drops
   workers = Math.max(1, Math.min(3, workers, list.length));
   const threadsEach = Math.max(1, Math.min(4, Number(savedConfig.whisper && savedConfig.whisper.threads) || Math.floor(cores / workers)));
   const vadModel = job.online ? null : findVadModel();
@@ -1702,7 +2103,7 @@ async function aiRun(job) {
   const tick = setInterval(() => {
     const per = job.partMs || (CH * 1000 * 1.5);
     let frac = 0; inflight.forEach((w) => { frac += Math.min(0.95, (Date.now() - w.t0) / per); });
-    job.pct = Math.max(job.pct, ((doneSet.size + frac) / job.chunks) * 99.5);
+    job.pct = Math.max(job.pct, 20 + ((doneSet.size + frac) / job.chunks) * 79.5);
   }, 700);
 
   const HP = 3, TP = 3;                      // v1.13: each slice is read 3 s early and 3 s late so no sentence is cut at a chunk edge
@@ -1719,26 +2120,44 @@ async function aiRun(job) {
       // Audio extraction, three attempts: normal -> skip corrupt AAC frames -> slow exact seek. A bad file never kills the job.
       const extract = async (mode) => {
         try { fs.unlinkSync(wav); } catch (e) {}
-        const a = ['-v', 'error', '-nostdin', '-y'];
+        job.state = 'extracting';
+        job.msg = `Extracting audio · ${i + 1} of ${job.chunks}`;
+        const a = ['-v', 'error', '-nostdin', '-y', '-progress', 'pipe:1'];
         if (mode >= 1) a.push('-err_detect', 'ignore_err', '-fflags', '+discardcorrupt+genpts');
         if (mode < 2) a.push('-ss', String(ss));
         a.push('-i', job.path, '-map', job.audioTrack);
         if (mode >= 2) a.push('-ss', String(ss));
         if (sliceLen > 0) a.push('-t', String(sliceLen));
-        // voice-focused audio: dialogue centre channel on 5.1, band-pass + denoise in AI mode (plain downmix for the fallbacks)
         const down = job.centre ? 'pan=mono|c0=0.85*FC+0.15*FL+0.15*FR' : 'pan=mono|c0=0.5*c0+0.5*c1';
         const chain = [];
         if (mode === 0 && (job.centre || channels >= 2)) chain.push(down);
-        // No denoiser: it treats singing / background music as noise and eats those lines. Band-pass the voice range and lift quiet speech instead.
         if (mode === 0 && job.songs) chain.push('highpass=f=60', 'lowpass=f=9000', 'dynaudnorm=f=150:g=7');
         else if (mode === 0 && job.mode !== 'quick') chain.push('highpass=f=90', 'lowpass=f=7600', 'dynaudnorm=f=150:g=7');
         else if (mode === 0) chain.push('highpass=f=80');
         chain.push('aresample=async=1:first_pts=0');
         a.push('-vn', '-af', chain.join(','), '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', wav);
-        const tail = { t: '' };
-        const r = await aiSpawnWait(job, 'ffmpeg', a, tail);
+
+        const r = await new Promise((resolve) => {
+          const p = spawn('ffmpeg', a, { stdio: ['ignore', 'pipe', 'pipe'] });
+          job.proc = p; (job.procs = job.procs || new Set()).add(p); p.on('close', () => job.procs.delete(p));
+          let tail = '';
+          p.stdout.on('data', (c) => {
+            const m = /out_time_ms=(\d+)/.exec(c.toString());
+            if (m && sliceLen > 0) {
+              const secDone = Math.min(sliceLen, Number(m[1]) / 1e6);
+              const basePct = (i / Math.max(1, job.chunks)) * 20;
+              const slicePct = (secDone / sliceLen) * (20 / Math.max(1, job.chunks));
+              job.pct = Math.max(job.pct, Math.min(20, basePct + slicePct));
+            }
+          });
+          p.stderr.on('data', (c) => { tail = (tail + c.toString()).slice(-600); });
+          p.on('error', (e) => resolve({ code: -1, signal: null, err: e.message, tail }));
+          p.on('close', (code, signal) => resolve({ code, signal, tail }));
+        });
+        job.pct = Math.max(job.pct, ((i + 1) / Math.max(1, job.chunks)) * 20);
+        job.state = 'transcribing';
         let size = 0; try { size = fs.statSync(wav).size; } catch (e) {}
-        return { r, size, tail: tail.t };
+        return { r, size, tail: r.tail || '' };
       };
       let ex = await extract(0);
       for (let mode = 1; mode <= 2 && alive() && !fatal && ex.r.code !== 0 && ex.size < Math.max(1000, sliceLen * 32000 * 0.9); mode++) {
@@ -1838,7 +2257,7 @@ async function aiRun(job) {
       job.cues.push(...cues);
       doneSet.add(i); job.chunk = Math.min(doneSet.size + 1, job.chunks);
       job.doneSec = list.reduce((n, c, k) => n + (doneSet.has(k) ? c.len : 0), 0);
-      job.pct = Math.max(job.pct, (doneSet.size / job.chunks) * 99);
+      job.pct = Math.max(job.pct, 20 + (doneSet.size / job.chunks) * 79);
       job.cues.sort((a, b) => a.s - b.s);
       const lastCue = [...cues].reverse().find((c) => /[^\s\[\]\(\)\u266a\u266b]/.test(c.text.replace(/[\[\(].*?[\]\)]/g, '')));
       if (lastCue) job.last = lastCue.text;
@@ -2006,23 +2425,80 @@ function dropThumbQueue() {
 }
 app.get('/api/tasks', (req, res) => {
   const tasks = [];
+  const cfg = onlineCfg();
+  const providerName = cfg.base.includes('groq') ? 'Groq' : cfg.base.includes('openai') ? 'OpenAI' : 'Online AI';
+
   aiJobs.forEach((j) => {
     const pub = aiPublic(j);
     const live = ['queued', 'extracting', 'transcribing'].includes(j.state);
-    tasks.push({ id: 'ai:' + j.key, type: 'ai', title: niceSubName(j.relPath || j.path || '', ''), file: j.relPath, label: j.mode === 'quick' ? 'Quick subtitles' : 'AI subtitles',
-      state: j.state, pct: pub.pct, detail: j.state === 'transcribing' ? `Part ${pub.chunk} of ${pub.chunks}${pub.eta != null ? ` \u00b7 ~${Math.max(1, Math.round(pub.eta / 60))} min left` : ''}` : (j.state === 'queued' ? 'Waiting in queue' : (j.msg || '')),
-      elapsed: pub.elapsed, eta: pub.eta, last: pub.last, opts: { audioTrack: j.audioTrack, lang: j.lang, translate: !!j.translate }, msg: j.state === 'error' ? j.msg : '', canStop: live, canClear: !live, meta: `${j.model || ''} \u00b7 ${j.lang || 'auto'}${j.translate ? ' \u2192 en' : ''}`, created: j.createdAt || 0 });
+    const rawModel = String(j.model || '').replace(/^online:/, '');
+    const engineTag = j.online ? `${providerName}: ${rawModel}` : (rawModel || 'whisper.cpp');
+    const linesCount = (j.cues && j.cues.length) || (aiIndex[j.key] && aiIndex[j.key].lines) || 0;
+    const lastText = pub.last || (aiIndex[j.key] && aiIndex[j.key].last) || '';
+
+    tasks.push({
+      id: 'ai:' + j.key,
+      type: 'ai',
+      title: niceSubName(j.relPath || j.path || '', ''),
+      file: j.relPath,
+      label: `AI SUBTITLES - ${engineTag}`,
+      state: j.state,
+      pct: pub.pct,
+      chunk: pub.chunk || (j.state === 'done' ? (pub.chunks || 1) : 0),
+      chunks: pub.chunks || (j.online ? 1 : 0),
+      lines: linesCount,
+      elapsed: pub.elapsed || 0,
+      eta: pub.eta,
+      last: lastText,
+      opts: { audioTrack: j.audioTrack, lang: j.lang, translate: !!j.translate, online: !!j.online, mode: j.mode || 'ai', songs: !!j.songs },
+      msg: j.state === 'error' ? (j.msg || 'Timeout / Limit reached') : '',
+      canStop: live,
+      canClear: !live,
+      created: j.createdAt || 0
+    });
   });
+
   if (activeTranscodeProc) {
-    tasks.push({ id: 'transcode', type: 'transcode', title: path.basename(activeTranscodeFile).replace(/\.[^.]+$/, ''), file: activeTranscodeFile, label: 'Live video conversion',
-      state: isTranscodeFrozen ? 'paused' : 'running', pct: null, detail: `${transcodeStats.height || ''}p \u00b7 speed ${transcodeStats.speed ? transcodeStats.speed.toFixed(2) + 'x' : '\u2026'}`,
-      canStop: true, canClear: false, meta: transcodeStats.quality || '', created: Date.now() });
+    tasks.push({
+      id: 'transcode',
+      type: 'transcode',
+      title: path.basename(activeTranscodeFile).replace(/\.[^.]+$/, ''),
+      file: activeTranscodeFile,
+      label: `TRANSCODE - ${transcodeStats.quality || 'H.264'}`,
+      state: isTranscodeFrozen ? 'paused' : 'transcribing',
+      pct: null,
+      chunk: 1,
+      chunks: 1,
+      lines: 0,
+      elapsed: 0,
+      eta: null,
+      detail: `${transcodeStats.height || ''}p · ${transcodeStats.speed ? transcodeStats.speed.toFixed(2) + 'x' : '...'}`,
+      canStop: true,
+      canClear: false,
+      created: Date.now()
+    });
   }
+
   onlineTasks.forEach((t) => tasks.push(t));
   if (thumbQueue.length || thumbRunning) {
-    tasks.push({ id: 'thumbs', type: 'thumbs', title: 'Thumbnails', label: 'Thumbnail generation', state: 'running', pct: null, detail: `${thumbQueue.length + (thumbRunning ? 1 : 0)} left`, canStop: true, canClear: false, meta: '', created: Date.now() });
+    tasks.push({
+      id: 'thumbs',
+      type: 'thumbs',
+      title: 'Thumbnail Cache',
+      label: 'THUMBS - FFmpeg',
+      state: 'transcribing',
+      pct: null,
+      chunk: 1,
+      chunks: thumbQueue.length + (thumbRunning ? 1 : 0),
+      lines: 0,
+      elapsed: 0,
+      eta: null,
+      canStop: true,
+      canClear: false,
+      created: Date.now()
+    });
   }
-  tasks.sort((a, b) => (b.created || 0) - (a.created || 0));
+
   res.json({ tasks, activeCount: tasks.filter((t) => t.canStop).length });
 });
 function aiStopKey(key) {
@@ -2519,6 +2995,79 @@ app.post('/api/thumbs/clear', (req, res) => {
   res.json({ status: 'cleared', removed: n });
 });
 
+
+/* ---- cache screen: sizes + clear (host only) ---- */
+function dirInfo(dir) {
+  let bytes = 0, files = 0;
+  (function walk(d) {
+    let ents = [];
+    try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return; }
+    ents.forEach((en) => {
+      const p = path.join(d, en.name);
+      if (en.isDirectory()) return walk(p);
+      try { bytes += fs.statSync(p).size; files++; } catch (e) {}
+    });
+  })(dir);
+  return { bytes, files };
+}
+function dirWipe(dir) {
+  let n = 0;
+  (function walk(d, top) {
+    let ents = [];
+    try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return; }
+    ents.forEach((en) => {
+      const p = path.join(d, en.name);
+      if (en.isDirectory()) { walk(p, false); try { fs.rmdirSync(p); } catch (e) {} return; }
+      try { fs.unlinkSync(p); n++; } catch (e) {}
+    });
+  })(dir, true);
+  return n;
+}
+app.get('/api/cache/info', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const a = dirInfo(THUMB_DIR), b = dirInfo(YT_DIR), c = dirInfo(TC_DIR);
+  res.json({ thumbs: { bytes: a.bytes + b.bytes, files: a.files + b.files }, converted: c, total: a.bytes + b.bytes + c.bytes });
+});
+app.post('/api/cache/clear', (req, res) => {
+  const what = String((req.body && req.body.what) || '');
+  let removed = 0;
+  if (what === 'thumbs' || what === 'all') { removed += dirWipe(THUMB_DIR) + dirWipe(YT_DIR); thumbFailed.clear(); }
+  if (what === 'converted' || what === 'all') { try { killTranscode(); } catch (e) {} removed += dirWipe(TC_DIR); }
+  if (!removed && !['thumbs', 'converted', 'all'].includes(what)) return res.status(400).send('Unknown target');
+  res.json({ status: 'cleared', removed });
+});
+
+/* ---- backup & restore (host only). Backup is built client-side from /api/history + /api/profile ---- */
+app.post('/api/restore', (req, res) => {
+  const b = req.body || {};
+  const mode = b.mode === 'replace' ? 'replace' : 'merge';
+  let hist = 0, prof = 0;
+  if (b.history && typeof b.history === 'object') {
+    if (mode === 'replace') Object.keys(historyData).forEach((k) => delete historyData[k]);
+    Object.keys(b.history).slice(0, 50000).forEach((k) => {
+      const h = b.history[k];
+      if (!h || typeof h !== 'object') return;
+      const key = String(h.relPath || k).slice(0, 1024);
+      const t = Math.max(0, Number(h.time) || 0), d = Math.max(0, Number(h.dur) || 0);
+      const upd = Number(h.updated) || 0;
+      const cur = historyData[key];
+      if (cur && (cur.updated || 0) >= upd) return;
+      historyData[key] = { name: String(h.name || path.basename(key)).slice(0, 512), relPath: key, time: Math.floor(t), dur: Math.floor(d),
+        percent: d > 0 ? Math.max(0, Math.min(100, Math.floor((t / d) * 100))) : Math.max(0, Math.min(100, Number(h.percent) || 0)), updated: upd || Date.now() };
+      hist++;
+    });
+    persistHistory();
+  }
+  if (b.profile && typeof b.profile === 'object') {
+    Object.keys(b.profile).forEach((k) => {
+      const c = b.profile[k];
+      if (!PROFILE_KEYS.has(k) || !c || typeof c.v !== 'string' || c.v.length > 512 * 1024) return;
+      profileData[k] = { v: c.v, t: Date.now() }; prof++;
+    });
+    if (prof) profileSave();
+  }
+  res.json({ ok: true, history: hist, settings: prof });
+});
 
 /* ------------------------------------------------------------------ */
 /* Online metadata & official artwork (Series/Playlist only, IPv4)    */
