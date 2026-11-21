@@ -27,7 +27,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
     lint {
         checkReleaseBuilds = false
         abortOnError = false
@@ -35,6 +34,10 @@ android {
     packaging { jniLibs { useLegacyPackaging = true } }
     // The web UI lives in ../public and is copied into the app at build time (one source of truth).
     sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("generated/webassets"))
+}
+
+kotlin {
+    compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) }
 }
 
 val copyWeb by tasks.registering(Copy::class) {

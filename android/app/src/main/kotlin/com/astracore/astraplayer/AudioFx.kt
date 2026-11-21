@@ -23,7 +23,7 @@ class AudioFx {
         try { bass = BassBoost(0, session) } catch (e: Exception) { }
         try { virt = Virtualizer(0, session) } catch (e: Exception) { }
         try { rev = PresetReverb(0, session) } catch (e: Exception) { }
-        last?.let { apply(it) }
+        last?.let { applyFx(it) }
     }
 
     fun release() {
@@ -34,7 +34,7 @@ class AudioFx {
         eq = null; bass = null; virt = null; rev = null
     }
 
-    fun apply(o: JSONObject) {
+    fun applyFx(o: JSONObject) {
         last = o
         val on = o.optBoolean("on", true)
         val arr = o.optJSONArray("bands")

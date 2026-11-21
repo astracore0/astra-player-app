@@ -287,7 +287,7 @@ class MainActivity : Activity() {
             }
         }
         @JavascriptInterface fun audioTrack(n: Int) { ui.post { selectAudio(n) } }
-        @JavascriptInterface fun fx(json: String) { ui.post { try { audioFx.apply(JSONObject(json)) } catch (e: Exception) { } } }
+        @JavascriptInterface fun fx(json: String) { ui.post { try { audioFx.applyFx(JSONObject(json)) } catch (e: Exception) { } } }
         @JavascriptInterface fun filters(b: Double, c: Double, s: Double, h: Double, w: Double) {
             ui.post { filt = floatArrayOf(b.toFloat(), c.toFloat(), s.toFloat(), h.toFloat(), w.toFloat()); applyFilters() }
         }
