@@ -1,5 +1,8 @@
 # Changelog
 
+## 2.9.1 (preview)
+- App: the picture follows the page scroll frame by frame (stopgap until the native player screen).
+
 ## 2.9.0 (preview)
 - App: view-size button (aA) in the header scales the whole app; edge-to-edge under the camera notch; fullscreen hides the page behind the player.
 - App: Restore opens the file manager; Backup saves into the Download folder.

@@ -55,6 +55,8 @@ class MainActivity : Activity() {
     private lateinit var rootView: FrameLayout
     private lateinit var prefs: SharedPreferences
     private var uiScale = 1f
+    private var vx = 0.0
+    private var vy = 0.0   // the player box in page (document) coordinates, CSS px
     private var fileCb: ValueCallback<Array<Uri>>? = null
     private var metaSent = false
     private var pendingAudio = 0
@@ -96,6 +98,7 @@ class MainActivity : Activity() {
         web.setBackgroundColor(Color.TRANSPARENT)
         rootView.addView(web, FrameLayout.LayoutParams(-1, -1))
         setContentView(rootView)
+        web.setOnScrollChangeListener { _, _, _, _, _ -> placeVideo() }
         rootView.addOnLayoutChangeListener { _, l, t, r, b, ol, ot, orr, ob -> if (r - l != orr - ol || b - t != ob - ot) ui.post { applyUiScale() } }
 
         val loader = WebViewAssetLoader.Builder()
@@ -140,6 +143,13 @@ class MainActivity : Activity() {
         web.loadUrl("$host/assets/www/index.html")
         ui.post(ticker)
         askStorage()
+    }
+
+    // Keeps the picture exactly under the web player box while the page scrolls (WebView scroll offset is in device px).
+    private fun placeVideo() {
+        val d = resources.displayMetrics.density
+        playerView.translationX = (vx * d * uiScale).toFloat()
+        playerView.translationY = ((vy * d - web.scrollY) * uiScale).toFloat()
     }
 
     private fun applyUiScale() {
@@ -353,8 +363,9 @@ class MainActivity : Activity() {
                 if (!show) { playerView.visibility = View.GONE; return@post }
                 val d = resources.displayMetrics.density * uiScale
                 val lp = FrameLayout.LayoutParams((w * d).toInt().coerceAtLeast(1), (h * d).toInt().coerceAtLeast(1))
-                lp.leftMargin = (l * d).toInt(); lp.topMargin = (t * d).toInt()
                 playerView.layoutParams = lp
+                vx = l; vy = t
+                placeVideo()
                 playerView.visibility = View.VISIBLE
             }
         }

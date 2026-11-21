@@ -129,8 +129,10 @@
       vis = r.width > 2 && r.height > 2;
     }
     clear(vis);
-    var key = vis ? [r.left, r.top, r.width, r.height].map(Math.round).join(',') : 'x';
-    if (key !== lastRect) { lastRect = key; N.rect(vis ? r.left : 0, vis ? r.top : 0, vis ? r.width : 0, vis ? r.height : 0, vis); }
+    // document coordinates: the app moves the picture together with the page's scroll position, frame by frame
+    var top = vis ? r.top + (window.pageYOffset || 0) : 0;
+    var key = vis ? [r.left, top, r.width, r.height].map(Math.round).join(',') : 'x';
+    if (key !== lastRect) { lastRect = key; N.rect(vis ? r.left : 0, top, vis ? r.width : 0, vis ? r.height : 0, vis); }
   }
   setInterval(syncRect, 200);
   window.addEventListener('scroll', syncRect, true);
