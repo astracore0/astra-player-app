@@ -1,6 +1,9 @@
 package com.astracore.astraplayer
 
+import android.app.ActivityManager
 import android.content.Context
+import android.os.Process
+import android.os.SystemClock
 import android.graphics.Bitmap
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
@@ -227,10 +230,37 @@ class Api(private val ctx: Context) {
                 thumbDir.listFiles()?.forEach { f -> f.delete() }
                 return ok(JSONObject().put("status", "cleared"))
             }
+            "/api/ai/online" -> {
+                if (method == "POST") return Pair(400, JSONObject().put("error", "AI subtitles are not available in the app yet").toString())
+                return ok(JSONObject().put("configured", false).put("base", "").put("model", "").put("hint", ""))
+            }
+            "/api/ai/capabilities" -> return ok(JSONObject().put("online", false).put("available", false).put("local", false)
+                .put("bin", false).put("vad", false).put("models", JSONArray()).put("queued", 0))
             "/api/tasks" -> return ok(JSONObject().put("tasks", JSONArray()))
-            "/api/system/status" -> return ok(JSONObject())
+            "/api/system/status" -> return ok(systemStatus())
         }
         return Pair(404, JSONObject().put("error", "Not available in the app yet").toString())
+    }
+
+    private var lastCpuMs = Process.getElapsedCpuTime()
+    private var lastWallMs = SystemClock.elapsedRealtime()
+    private var lastCpuPct = 0.0
+
+    private fun systemStatus(): JSONObject {
+        val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val mi = ActivityManager.MemoryInfo()
+        am.getMemoryInfo(mi)
+        val pss = try { am.getProcessMemoryInfo(intArrayOf(Process.myPid()))[0].totalPss / 1024.0 } catch (e: Exception) { 0.0 }
+        val cpu = Process.getElapsedCpuTime()
+        val wall = SystemClock.elapsedRealtime()
+        if (wall - lastWallMs >= 500) {
+            lastCpuPct = ((cpu - lastCpuMs).toDouble() / (wall - lastWallMs)) * 100.0 / Runtime.getRuntime().availableProcessors()
+            lastCpuMs = cpu; lastWallMs = wall
+        }
+        val total = mi.totalMem / 1048576.0
+        return JSONObject().put("uptime", 0).put("ramUsedMB", String.format("%.1f", pss)).put("heapUsedMB", String.format("%.1f", pss))
+            .put("totalSysMemMB", String.format("%.0f", total)).put("usedSysMemMB", String.format("%.0f", total - mi.availMem / 1048576.0))
+            .put("cpuPercent", Math.round(lastCpuPct.coerceIn(0.0, 100.0)))
     }
 
     private fun postHistory(b: JSONObject): Pair<Int, String> {
@@ -316,7 +346,7 @@ class Api(private val ctx: Context) {
         if (audio.length() == 0) audio.put(JSONObject().put("streamIndex", "0:a:0").put("title", "Default Audio").put("lang", "und").put("codec", "aac"))
         // is10BitHevc stays false: the app decodes natively, so the UI never asks for a server-side conversion.
         return ok(JSONObject().put("audioTracks", audio).put("subtitleTracks", subs).put("is10BitHevc", false)
-            .put("duration", dur).put("chapters", JSONArray()))
+            .put("duration", dur).put("chapters", Chapters.read(f, dur)))
     }
 
     private fun audioName(mime: String): String = when {
@@ -333,7 +363,7 @@ class Api(private val ctx: Context) {
     private fun subFormat(mime: String): String? = when (mime) {
         "application/x-subrip" -> "srt"
         "text/x-ssa" -> "ass"
-        "text/vtt" -> "vtt"
+        "application/x-quicktime-tx3g" -> "tx3g"
         else -> null
     }
 
@@ -397,6 +427,8 @@ class Api(private val ctx: Context) {
                 sb.append(header.trimEnd()).append("\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
             }
             var n = 0
+            var pendText: String? = null
+            var pendStart = 0L
             while (true) {
                 buf.clear()
                 val size = ex.readSampleData(buf, 0)
@@ -426,14 +458,29 @@ class Api(private val ctx: Context) {
                         .append(p[9]).append(',').append(p[10].trimEnd()).append('\n')
                     n++
                 } else {
-                    sb.append(text).append('\n')
+                    // MP4 "mov_text": 2-byte length + text. A cue ends where the next sample starts (an empty sample clears it).
+                    var txt = ""
+                    if (size >= 2) {
+                        val len = ((arr[0].toInt() and 0xFF) shl 8) or (arr[1].toInt() and 0xFF)
+                        txt = String(arr, 2, minOf(len, size - 2), Charsets.UTF_8).trim()
+                    }
+                    if (pendText != null) {
+                        n++
+                        sb.append(n).append('\n').append(tc(pendStart, ',')).append(" --> ").append(tc(maxOf(start, pendStart + 500000), ',')).append('\n').append(pendText).append("\n\n")
+                        pendText = null
+                    }
+                    if (txt.isNotEmpty()) { pendText = txt; pendStart = start }
                 }
             }
-            val out = JSONObject().put("fmt", kind).put("text", sb.toString()).toString()
+            if (kind == "tx3g" && pendText != null) {
+                n++
+                sb.append(n).append('\n').append(tc(pendStart, ',')).append(" --> ").append(tc(pendStart + 3000000, ',')).append('\n').append(pendText).append("\n\n")
+            }
+            val out = JSONObject().put("fmt", if (kind == "tx3g") "srt" else kind).put("text", sb.toString()).toString()
             subCache[key] = out
             return Pair(200, out)
         } catch (e: Exception) {
-            return Pair(500, "Subtitle extraction failed")
+            return Pair(500, "extraction failed: " + (e.message ?: e.javaClass.simpleName))
         } finally {
             try { ex.release() } catch (e: Exception) { }
         }

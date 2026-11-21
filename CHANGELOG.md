@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.9.0 (preview)
+- App: view-size button (aA) in the header scales the whole app; edge-to-edge under the camera notch; fullscreen hides the page behind the player.
+- App: Restore opens the file manager; Backup saves into the Download folder.
+- App: telemetry (CPU, RAM) and AI settings show real values instead of "undefined".
+- App: MKV chapters (named Opening / Ending / Preview like the server) and MP4 (mov_text) subtitles.
+
 ## 2.8.0 (preview)
 - App: the native picture now sits exactly under the player box and is hidden on every other page; real fullscreen with native rotation; play/pause state updates instantly so the controls hide again.
 - App: player errors show the real error code. Settings button next to the engine badge in the header.

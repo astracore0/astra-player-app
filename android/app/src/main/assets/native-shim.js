@@ -66,10 +66,41 @@
   window.astraSetSubs = function (url) {
     trackSrc = url; fakeTrack.cues = [];
     return fetch(url).then(function (r) {
-      if (!r.ok) throw new Error('sub ' + r.status);
+      if (!r.ok) return r.text().then(function (t) { throw new Error(String(t || ('error ' + r.status)).slice(0, 80)); });
       return r.text();
     }).then(function (t) { fakeTrack.cues = parseVtt(t); });
   };
+
+  /* ---- view size (like a browser's zoom): scales the whole app ---- */
+  var sizeSteps = [60, 70, 80, 90, 100, 110, 120];
+  function curSize() { try { return N.getUiScale() | 0 || 100; } catch (e) { return 100; } }
+  function setSize(p) {
+    p = Math.max(50, Math.min(130, p));
+    try { N.uiScale(p); } catch (e) {}
+    var pop = document.getElementById('astraSizePop');
+    if (pop) { pop.querySelector('.val').textContent = p + '%'; Array.prototype.forEach.call(pop.querySelectorAll('.chips button'), function (b) { b.classList.toggle('on', +b.dataset.p === p); }); }
+    setTimeout(function () { window.dispatchEvent(new Event('resize')); }, 120);
+  }
+  document.addEventListener('DOMContentLoaded', function () {
+    var tools = document.querySelector('.header-right-tools');
+    if (!tools) return;
+    var btn = document.createElement('button');
+    btn.className = 'icon-btn'; btn.id = 'astraSizeBtn'; btn.textContent = 'aA'; btn.title = 'View size';
+    tools.insertBefore(btn, tools.firstChild);
+    var pop = document.createElement('div'); pop.id = 'astraSizePop';
+    pop.innerHTML = '<p class="hint">View size</p><div class="row"><button data-d="-5">\u2212</button><span class="val"></span><button data-d="5">+</button></div><div class="chips">' +
+      sizeSteps.map(function (p) { return '<button data-p="' + p + '">' + p + '%</button>'; }).join('') + '</div>';
+    document.body.appendChild(pop);
+    pop.addEventListener('click', function (e) {
+      var b = e.target.closest('button'); if (!b) return;
+      if (b.dataset.d) setSize(curSize() + (+b.dataset.d)); else if (b.dataset.p) setSize(+b.dataset.p);
+    });
+    btn.addEventListener('click', function (e) { e.stopPropagation(); pop.classList.toggle('open'); setSize(curSize()); });
+    document.addEventListener('click', function (e) { if (!pop.contains(e.target) && e.target !== btn) pop.classList.remove('open'); });
+  });
+
+  /* ---- backup file: written straight into the Download folder ---- */
+  window.astraNativeSave = function (name, text) { try { return N.saveText(name, text) || ''; } catch (e) { return ''; } };
 
   /* ---- equalizer and filters go to the native player ---- */
   window.astraNativeFx = function (o) { try { N.fx(JSON.stringify(o)); } catch (e) {} };
@@ -78,7 +109,8 @@
 
   /* ---- transparent page while a video plays, so the native picture shows through ---- */
   var st = document.createElement('style');
-  st.textContent = 'html.astra-native .astra-clear{background:transparent!important;background-image:none!important}html.astra-native #glCanvas,html.astra-native .source-mode-pill{display:none!important}';
+  st.textContent = 'html.astra-native .astra-clear{background:transparent!important;background-image:none!important}html.astra-native #glCanvas,html.astra-native .source-mode-pill{display:none!important}html.astra-native .astra-hide{visibility:hidden!important}' +
+    '#astraSizeBtn{font-weight:800;font-size:14px;letter-spacing:-.5px}#astraSizePop{position:fixed;top:calc(var(--safe-t,0px) + 64px);right:calc(var(--safe-r,0px) + 12px);z-index:9000;background:#111a2b;border:1px solid #2b3a57;border-radius:14px;padding:12px;display:none;box-shadow:0 10px 30px rgba(0,0,0,.6);min-width:210px}#astraSizePop.open{display:block}#astraSizePop .row{display:flex;align-items:center;justify-content:space-between;gap:8px}#astraSizePop button{background:#1b2740;color:#e8eefc;border:1px solid #2b3a57;border-radius:10px;padding:8px 12px;font-size:15px;font-weight:700}#astraSizePop .val{font-size:18px;font-weight:800;color:#60a5fa}#astraSizePop .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}#astraSizePop .chips button{padding:6px 10px;font-size:13px}#astraSizePop .chips button.on{background:#2f5fd0;border-color:#4b82ff}#astraSizePop .hint{font-size:11px;color:#8a99b8;margin:0 0 8px}';
   document.addEventListener('DOMContentLoaded', function () { document.documentElement.classList.add('astra-native'); document.head.appendChild(st); });
   var clearOn = false;
   function clear(on) {
@@ -109,9 +141,23 @@
   var fsEl = null;
   Object.defineProperty(document, 'fullscreenElement', { get: function () { return fsEl; }, configurable: true });
   Object.defineProperty(document, 'webkitFullscreenElement', { get: function () { return fsEl; }, configurable: true });
+  var hiddenEls = [];
+  function fsHidePage(el) {
+    hiddenEls.forEach(function (c) { c.classList.remove('astra-hide'); });
+    hiddenEls = [];
+    if (!el || el === document.documentElement) return;
+    var n = el;
+    while (n && n !== document.documentElement) {
+      var p = n.parentElement;
+      if (!p) break;
+      Array.prototype.forEach.call(p.children, function (c) { if (c !== n) { c.classList.add('astra-hide'); hiddenEls.push(c); } });
+      n = p;
+    }
+  }
   function fsSet(el) {
     if (fsEl && fsEl !== el && fsEl.classList) fsEl.classList.remove('astra-fs');
     fsEl = el;
+    fsHidePage(el);
     if (el && el !== document.documentElement) el.classList.add('astra-fs');
     document.documentElement.classList.toggle('astra-fs-on', !!el);
     setTimeout(function () { document.dispatchEvent(new Event('fullscreenchange')); syncRect(); }, 0);

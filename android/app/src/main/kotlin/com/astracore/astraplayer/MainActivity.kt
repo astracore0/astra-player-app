@@ -18,6 +18,8 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.webkit.ValueCallback
+import android.content.SharedPreferences
 import android.provider.Settings
 import android.view.View
 import android.view.WindowManager
@@ -50,6 +52,10 @@ class MainActivity : Activity() {
     private lateinit var playerView: PlayerView
     private lateinit var api: Api
     private var player: ExoPlayer? = null
+    private lateinit var rootView: FrameLayout
+    private lateinit var prefs: SharedPreferences
+    private var uiScale = 1f
+    private var fileCb: ValueCallback<Array<Uri>>? = null
     private var metaSent = false
     private var pendingAudio = 0
     private val audioFx = AudioFx()
@@ -72,7 +78,14 @@ class MainActivity : Activity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         api = Api(this)
 
-        val rootView = FrameLayout(this)
+        prefs = getSharedPreferences("astra", MODE_PRIVATE)
+        uiScale = prefs.getInt("ui", 100) / 100f
+        if (Build.VERSION.SDK_INT >= 28) {
+            val lp = window.attributes
+            lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            window.attributes = lp
+        }
+        rootView = FrameLayout(this)
         rootView.setBackgroundColor(Color.BLACK)
         // A TextureView surface (not SurfaceView) so colour filters can be applied to the picture with a GPU colour matrix.
         playerView = LayoutInflater.from(this).inflate(R.layout.player_view, rootView, false) as PlayerView
@@ -83,6 +96,7 @@ class MainActivity : Activity() {
         web.setBackgroundColor(Color.TRANSPARENT)
         rootView.addView(web, FrameLayout.LayoutParams(-1, -1))
         setContentView(rootView)
+        rootView.addOnLayoutChangeListener { _, l, t, r, b, ol, ot, orr, ob -> if (r - l != orr - ol || b - t != ob - ot) ui.post { applyUiScale() } }
 
         val loader = WebViewAssetLoader.Builder()
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
@@ -92,7 +106,18 @@ class MainActivity : Activity() {
         s.domStorageEnabled = true
         s.mediaPlaybackRequiresUserGesture = false
         s.allowFileAccess = false
-        web.webChromeClient = WebChromeClient()
+        web.webChromeClient = object : WebChromeClient() {
+            override fun onShowFileChooser(w: WebView, cb: ValueCallback<Array<Uri>>, params: FileChooserParams): Boolean {
+                fileCb?.onReceiveValue(null)
+                fileCb = cb
+                val i = Intent(Intent.ACTION_GET_CONTENT)
+                i.addCategory(Intent.CATEGORY_OPENABLE)
+                i.type = "*/*"
+                i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, params.mode == FileChooserParams.MODE_OPEN_MULTIPLE)
+                try { startActivityForResult(i, 77) } catch (e: Exception) { fileCb = null; cb.onReceiveValue(null); return false }
+                return true
+            }
+        }
         web.addJavascriptInterface(Bridge(), "AstraNative")
         val shim = assets.open("native-shim.js").bufferedReader().use { r -> r.readText() }
         web.webViewClient = object : WebViewClient() {
@@ -115,6 +140,32 @@ class MainActivity : Activity() {
         web.loadUrl("$host/assets/www/index.html")
         ui.post(ticker)
         askStorage()
+    }
+
+    private fun applyUiScale() {
+        val w = rootView.width
+        val h = rootView.height
+        if (w == 0 || h == 0) return
+        val z = uiScale
+        web.layoutParams = FrameLayout.LayoutParams((w / z).toInt(), (h / z).toInt())
+        web.pivotX = 0f
+        web.pivotY = 0f
+        web.scaleX = z
+        web.scaleY = z
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != 77) return
+        val cb = fileCb
+        fileCb = null
+        var out: Array<Uri>? = null
+        if (resultCode == RESULT_OK && data != null) {
+            val clip = data.clipData
+            out = if (clip != null) Array(clip.itemCount) { i -> clip.getItemAt(i).uri } else data.data?.let { u -> arrayOf(u) }
+        }
+        cb?.onReceiveValue(out)
     }
 
     private fun hasStorage(): Boolean =
@@ -300,7 +351,7 @@ class MainActivity : Activity() {
         @JavascriptInterface fun rect(l: Double, t: Double, w: Double, h: Double, show: Boolean) {
             ui.post {
                 if (!show) { playerView.visibility = View.GONE; return@post }
-                val d = resources.displayMetrics.density
+                val d = resources.displayMetrics.density * uiScale
                 val lp = FrameLayout.LayoutParams((w * d).toInt().coerceAtLeast(1), (h * d).toInt().coerceAtLeast(1))
                 lp.leftMargin = (l * d).toInt(); lp.topMargin = (t * d).toInt()
                 playerView.layoutParams = lp
@@ -312,6 +363,24 @@ class MainActivity : Activity() {
                 requestedOrientation = if (mode == "landscape") ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                 else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             }
+        }
+        @JavascriptInterface fun getUiScale(): Int = (uiScale * 100).toInt()
+        @JavascriptInterface fun uiScale(pct: Int) {
+            ui.post {
+                val p = pct.coerceIn(50, 130)
+                prefs.edit().putInt("ui", p).apply()
+                uiScale = p / 100f
+                applyUiScale()
+            }
+        }
+        @JavascriptInterface fun saveText(name: String, text: String): String {
+            return try {
+                val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                dir.mkdirs()
+                val f = File(dir, name.replace(Regex("[^A-Za-z0-9._-]"), "_"))
+                f.writeText(text)
+                "Download/" + f.name
+            } catch (e: Exception) { "" }
         }
         @JavascriptInterface fun resume() { ui.post { player?.playWhenReady = true } }
         @JavascriptInterface fun pause() { ui.post { player?.playWhenReady = false } }

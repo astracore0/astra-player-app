@@ -1324,7 +1324,7 @@ function resetSubtitleState() {
 function selectSubtitleUrl(url) {
   subsOn = true;
   if (window.astraSetSubs) {   // app: cues come from the native layer
-    window.astraSetSubs(url).then(() => { activeSubSignature = '\u0000'; setupSubtitleCues(); }).catch(() => showToast('Subtitle could not be loaded', 2500, 'err'));
+    window.astraSetSubs(url).then(() => { activeSubSignature = '\u0000'; setupSubtitleCues(); }).catch((e) => showToast('Subtitle could not be loaded' + (e && e.message ? ': ' + e.message : ''), 4000, 'err'));
     return;
   }
   mainTrack.src = url;
@@ -4427,9 +4427,16 @@ function initPrefsPanel() {
   $('btnBackup').onclick = async () => {
     try {
       const [h, p] = await Promise.all([fetch('/api/history').then((r) => r.json()), fetch('/api/profile').then((r) => r.json())]);
-      const blob = new Blob([JSON.stringify({ app: 'astra-player', version: 1, at: new Date().toISOString(), history: h, profile: p.keys || {} })], { type: 'application/json' });
+      const json = JSON.stringify({ app: 'astra-player', version: 1, at: new Date().toISOString(), history: h, profile: p.keys || {} });
+      const fname = 'astra-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+      if (window.astraNativeSave) {   // app: write straight into the Download folder
+        const where = window.astraNativeSave(fname, json);
+        showToast(where ? 'Backup saved: ' + where : 'Could not save the backup', 3500, where ? 'ok' : 'err');
+        return;
+      }
+      const blob = new Blob([json], { type: 'application/json' });
       const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
-      a.download = 'astra-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+      a.download = fname;
       document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
       showToast('Backup saved', 2000, 'ok');
     } catch (e) { showToast('Backup failed', 2500, 'err'); }
