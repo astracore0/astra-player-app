@@ -3,6 +3,7 @@ package com.astracore.astraplayer
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.graphics.Color
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
@@ -75,6 +76,7 @@ class MainActivity : Activity() {
         rootView.setBackgroundColor(Color.BLACK)
         // A TextureView surface (not SurfaceView) so colour filters can be applied to the picture with a GPU colour matrix.
         playerView = LayoutInflater.from(this).inflate(R.layout.player_view, rootView, false) as PlayerView
+        playerView.visibility = View.GONE   // shown only while a video plays, placed over the web page's player box
         rootView.addView(playerView, FrameLayout.LayoutParams(-1, -1))
 
         web = WebView(this)
@@ -185,7 +187,11 @@ class MainActivity : Activity() {
         return o.toString()
     }
 
-    private fun evt(name: String) { js("window.__astraEvt&&window.__astraEvt('$name',${stateJson()})") }
+    private fun evt(name: String, err: String? = null) {
+        val o = try { JSONObject(stateJson()) } catch (e: Exception) { JSONObject() }
+        if (err != null) o.put("err", err)
+        js("window.__astraEvt&&window.__astraEvt('$name',$o)")
+    }
 
     private fun ensurePlayer(): ExoPlayer {
         player?.let { return it }
@@ -210,7 +216,7 @@ class MainActivity : Activity() {
             override fun onAudioSessionIdChanged(audioSessionId: Int) { audioFx.attach(audioSessionId) }
             override fun onTracksChanged(tracks: Tracks) { selectAudio(pendingAudio) }
             override fun onVideoSizeChanged(v: androidx.media3.common.VideoSize) { evt("resize") }
-            override fun onPlayerError(e: androidx.media3.common.PlaybackException) { evt("error") }
+            override fun onPlayerError(e: androidx.media3.common.PlaybackException) { evt("error", e.errorCodeName + ": " + (e.cause?.message ?: e.message ?: "")) }
         })
         playerView.player = p
         player = p
@@ -290,6 +296,22 @@ class MainActivity : Activity() {
         @JavascriptInterface fun fx(json: String) { ui.post { try { audioFx.applyFx(JSONObject(json)) } catch (e: Exception) { } } }
         @JavascriptInterface fun filters(b: Double, c: Double, s: Double, h: Double, w: Double) {
             ui.post { filt = floatArrayOf(b.toFloat(), c.toFloat(), s.toFloat(), h.toFloat(), w.toFloat()); applyFilters() }
+        }
+        @JavascriptInterface fun rect(l: Double, t: Double, w: Double, h: Double, show: Boolean) {
+            ui.post {
+                if (!show) { playerView.visibility = View.GONE; return@post }
+                val d = resources.displayMetrics.density
+                val lp = FrameLayout.LayoutParams((w * d).toInt().coerceAtLeast(1), (h * d).toInt().coerceAtLeast(1))
+                lp.leftMargin = (l * d).toInt(); lp.topMargin = (t * d).toInt()
+                playerView.layoutParams = lp
+                playerView.visibility = View.VISIBLE
+            }
+        }
+        @JavascriptInterface fun orientation(mode: String) {
+            ui.post {
+                requestedOrientation = if (mode == "landscape") ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            }
         }
         @JavascriptInterface fun resume() { ui.post { player?.playWhenReady = true } }
         @JavascriptInterface fun pause() { ui.post { player?.playWhenReady = false } }

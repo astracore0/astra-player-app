@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.8.0 (preview)
+- App: the native picture now sits exactly under the player box and is hidden on every other page; real fullscreen with native rotation; play/pause state updates instantly so the controls hide again.
+- App: player errors show the real error code. Settings button next to the engine badge in the header.
+
 ## 2.7.0 (preview)
 - App: embedded subtitle tracks (SRT/ASS, with styling and positions) and audio-track switching without any conversion.
 - App: equalizer, bass boost, virtualizer and reverb use the phone's audio effects.

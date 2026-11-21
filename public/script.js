@@ -3587,6 +3587,7 @@ window.addEventListener('hashchange', () => {
 document.querySelectorAll('.drawer-item').forEach((btn) => {
   btn.onclick = () => navigateTo(btn.dataset.hash);
 });
+$('headerSettingsBtn').onclick = () => navigateTo('settings');
 $('openDrawerBtn').onclick = () => { $('sideDrawer').classList.add('open'); $('menuOverlay').classList.add('open'); };
 $('closeDrawerBtn').onclick = () => { $('sideDrawer').classList.remove('open'); $('menuOverlay').classList.remove('open'); };
 $('menuOverlay').onclick = () => { $('sideDrawer').classList.remove('open'); $('menuOverlay').classList.remove('open'); };

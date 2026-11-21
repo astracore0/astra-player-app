@@ -78,12 +78,57 @@
 
   /* ---- transparent page while a video plays, so the native picture shows through ---- */
   var st = document.createElement('style');
-  st.textContent = '.astra-clear{background:transparent!important;background-image:none!important}html.astra-native #glCanvas{display:none!important}';
+  st.textContent = 'html.astra-native .astra-clear{background:transparent!important;background-image:none!important}html.astra-native #glCanvas,html.astra-native .source-mode-pill{display:none!important}';
   document.addEventListener('DOMContentLoaded', function () { document.documentElement.classList.add('astra-native'); document.head.appendChild(st); });
+  var clearOn = false;
   function clear(on) {
+    if (on === clearOn) return;
+    clearOn = on;
     var e = document.getElementById('playerWrapper');
     while (e) { e.classList.toggle('astra-clear', on); e = e.parentElement; }
   }
+
+  /* ---- keep the native picture exactly under the web player box; hide it everywhere else ---- */
+  var lastRect = '';
+  function syncRect() {
+    var w = document.getElementById('playerWrapper'), vis = false, r = null;
+    if (w && window.__astraActive && window.__astraActive() && w.getClientRects().length > 0) {
+      r = w.getBoundingClientRect();
+      vis = r.width > 2 && r.height > 2;
+    }
+    clear(vis);
+    var key = vis ? [r.left, r.top, r.width, r.height].map(Math.round).join(',') : 'x';
+    if (key !== lastRect) { lastRect = key; N.rect(vis ? r.left : 0, vis ? r.top : 0, vis ? r.width : 0, vis ? r.height : 0, vis); }
+  }
+  setInterval(syncRect, 200);
+  window.addEventListener('scroll', syncRect, true);
+  window.addEventListener('resize', syncRect);
+  window.__astraSyncRect = syncRect;
+
+  /* ---- fullscreen: a CSS fullscreen (the page's :fullscreen rules are mirrored as .astra-fs) plus real native rotation ---- */
+  var fsEl = null;
+  Object.defineProperty(document, 'fullscreenElement', { get: function () { return fsEl; }, configurable: true });
+  Object.defineProperty(document, 'webkitFullscreenElement', { get: function () { return fsEl; }, configurable: true });
+  function fsSet(el) {
+    if (fsEl && fsEl !== el && fsEl.classList) fsEl.classList.remove('astra-fs');
+    fsEl = el;
+    if (el && el !== document.documentElement) el.classList.add('astra-fs');
+    document.documentElement.classList.toggle('astra-fs-on', !!el);
+    setTimeout(function () { document.dispatchEvent(new Event('fullscreenchange')); syncRect(); }, 0);
+  }
+  Element.prototype.requestFullscreen = function () { fsSet(this); return Promise.resolve(); };
+  document.exitFullscreen = function () { fsSet(null); return Promise.resolve(); };
+  try {
+    screen.orientation.lock = function () {
+      N.orientation('landscape');
+      return new Promise(function (res) {
+        var done = false;
+        function f() { if (done) return; done = true; window.removeEventListener('resize', f); res(); }
+        window.addEventListener('resize', f); setTimeout(f, 900);
+      });
+    };
+    screen.orientation.unlock = function () { N.orientation('unspecified'); };
+  } catch (e) {}
 
   /* ---- a stand-in for the <video> element, backed by the native player ---- */
   window.astraMakeVideo = function (real) {
@@ -117,14 +162,15 @@
       S.src = String(u || ''); S.t = 0; S.d = NaN; S.ended = false; S.ready = 0;
       var m = /[?&]file=([^&]*)/.exec(S.src);
       if (S.src.indexOf('/stream?') >= 0 && m) { var am = (typeof activeAudioStreamIndex === 'string') ? /^0:a:(\d+)$/.exec(activeAudioStreamIndex) : null;
-        clear(true); N.play(decodeURIComponent(m[1]), am ? +am[1] : 0); emit('loadstart'); }
+        N.play(decodeURIComponent(m[1]), am ? +am[1] : 0); emit('loadstart'); }
       else if (S.src) { emit('error'); }
     });
     v.removeAttribute = function (k) { if (k === 'src') S.src = ''; };
     v.getAttribute = function (k) { return k === 'src' ? (S.src || null) : real.getAttribute(k); };
-    v.load = function () { if (!S.src) { N.stop(); clear(false); S.paused = true; } };
-    v.play = function () { N.resume(); return Promise.resolve(); };
-    v.pause = function () { N.pause(); };
+    v.load = function () { if (!S.src) { N.stop(); S.paused = true; syncRect(); } };
+    v.play = function () { var was = S.paused; S.paused = false; N.resume(); if (was) emit('play'); return Promise.resolve(); };
+    v.pause = function () { var was = !S.paused; S.paused = true; N.pause(); if (was) emit('pause'); };
+    window.__astraActive = function () { return !!S.src; };
     v.getVideoPlaybackQuality = function () { return { totalVideoFrames: 0, droppedVideoFrames: 0 }; };
 
     function merge(o) {
@@ -144,6 +190,7 @@
       if (n === 'loadedmetadata') { S.ready = 4; emit('loadedmetadata'); emit('durationchange'); emit('canplay'); return; }
       if (n === 'canplay') { S.ready = 4; S.seeking = false; }
       if (n === 'resize') { emit('resize'); return; }
+      if (n === 'error' && o && o.err && window.showToast) { try { window.showToast('Player: ' + o.err, 6000, 'err'); } catch (e) {} }
       emit(n);
       if (n === 'timeupdate') return;
       emit('timeupdate');
