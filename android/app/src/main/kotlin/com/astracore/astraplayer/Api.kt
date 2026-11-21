@@ -4,7 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
-import androidx.media3.exoplayer.MediaExtractorCompat
+import androidx.media3.inspector.MediaExtractorCompat
 import java.nio.ByteBuffer
 import android.net.Uri
 import android.os.Environment
@@ -14,7 +14,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.security.MessageDigest
 
-/** Answers the same /api/* calls the Node server does, so the web UI runs unchanged inside the app. */
+/** Answers the same API calls the Node server does, so the web UI runs unchanged inside the app. */
 class Api(private val ctx: Context) {
     private val dir: File = ctx.filesDir
     private val thumbDir = File(ctx.cacheDir, "thumbs").apply { mkdirs() }
@@ -296,7 +296,7 @@ class Api(private val ctx: Context) {
         try {
             val ex = MediaExtractorCompat(ctx)
             try {
-                ex.setDataSource(Uri.fromFile(f), 0)
+                ex.setDataSource(f.absolutePath)
                 var an = 0
                 for (i in 0 until ex.trackCount) {
                     val fmt = ex.getTrackFormat(i)
@@ -373,7 +373,7 @@ class Api(private val ctx: Context) {
         if (hit != null) return Pair(200, hit)
         val ex = MediaExtractorCompat(ctx)
         try {
-            ex.setDataSource(Uri.fromFile(f), 0)
+            ex.setDataSource(f.absolutePath)
             val fmt = ex.getTrackFormat(idx)
             val mime = fmt.getString(MediaFormat.KEY_MIME) ?: ""
             val kind = subFormat(mime) ?: return Pair(415, "Unsupported subtitle format")

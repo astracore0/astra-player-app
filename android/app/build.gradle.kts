@@ -50,6 +50,7 @@ dependencies {
     val media3 = "1.11.1"
     implementation("androidx.media3:media3-exoplayer:$media3")
     implementation("androidx.media3:media3-ui:$media3")
+    implementation("androidx.media3:media3-inspector:$media3")
     implementation("io.github.anilbeesetti:nextlib-media3ext:1.11.1-0.19.0") // FFmpeg software decoders for Media3
     implementation("androidx.webkit:webkit:1.12.1")
     implementation("androidx.core:core-ktx:1.13.1")
