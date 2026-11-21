@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.7.0 (preview)
+- App: embedded subtitle tracks (SRT/ASS, with styling and positions) and audio-track switching without any conversion.
+- App: equalizer, bass boost, virtualizer and reverb use the phone's audio effects.
+- App: brightness, contrast, saturation, hue and warmth filters on the picture. Sharpening and audio delay are not in the app yet.
+
 ## 2.6.0 (preview)
 - **Standalone Android app** (`android/`): no Termux, no Node. Native ExoPlayer with hardware decoding first and bundled FFmpeg as the fallback (10-bit HEVC etc.), the same web UI inside a WebView, history and settings stored in the app. Built by the "Build Android app" GitHub Action.
 - Not in the app yet: subtitles, audio-track switching, equalizer, video filters, AI subtitles.
