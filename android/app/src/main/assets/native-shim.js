@@ -1,0 +1,153 @@
+/* Astra Player (Android app): connects the web UI to the native player and the in-app data layer. */
+(function () {
+  if (!window.AstraNative) return;
+  var N = window.AstraNative;
+  if (document.documentElement) document.documentElement.classList.add('astra-native');
+
+  /* ---- /api/* goes to the app instead of a server ---- */
+  var of = window.fetch.bind(window), seq = 0, pend = {};
+  window.fetch = function (input, init) {
+    var url = typeof input === 'string' ? input : (input && input.url) || '';
+    if (url.indexOf(location.origin) === 0) url = url.slice(location.origin.length);
+    if (url.indexOf('/api/subs/') === 0) return subsFetch(url);
+    if (url.indexOf('/api/') === 0 && !/^\/api\/thumb\?/.test(url)) {
+      var method = (init && init.method) || 'GET', body = init && init.body ? String(init.body) : '';
+      return new Promise(function (res) { var id = ++seq; pend[id] = res; N.api(id, method, url, body); });
+    }
+    return of(input, init);
+  };
+  window.__astraResp = function (id, status, text) {
+    var r = pend[id]; delete pend[id];
+    if (r) r(new Response(text, { status: status, headers: { 'Content-Type': 'application/json' } }));
+  };
+
+  /* ---- subtitles: the app returns raw SRT / ASS text, the same converters as the server turn it into WebVTT cues ---- */
+  function subsFetch(url) {
+    return new Promise(function (res) {
+      var id = ++seq;
+      pend[id] = function (resp) {
+        resp.text().then(function (t) {
+          if (resp.status !== 200) return res(new Response(t, { status: resp.status }));
+          try {
+            var o = JSON.parse(t), C = window.astraSubConv, vtt;
+            if (o.fmt === 'ass') vtt = C.assToVtt(o.text);
+            else if (o.fmt === 'srt') vtt = C.assToVtt(C.srtToAss(o.text));
+            else vtt = C.cleanAndDedupeVTT(o.text);
+            res(new Response(vtt, { status: 200, headers: { 'Content-Type': 'text/vtt' } }));
+          } catch (e) { res(new Response('Subtitle conversion failed', { status: 500 })); }
+        });
+      };
+      N.api(id, 'GET', url, '');
+    });
+  }
+  function ts(x) {
+    var m = /^(?:(\d+):)?(\d{2}):(\d{2})\.(\d{1,3})/.exec(x.trim());
+    return m ? ((+(m[1] || 0)) * 3600 + (+m[2]) * 60 + (+m[3]) + (+((m[4] + '00').slice(0, 3))) / 1000) : 0;
+  }
+  function parseVtt(text) {
+    var cues = [];
+    String(text).replace(/\r/g, '').split(/\n\n+/).forEach(function (blk) {
+      var lines = blk.split('\n'), k = -1, i;
+      for (i = 0; i < lines.length; i++) if (lines[i].indexOf('-->') >= 0) { k = i; break; }
+      if (k < 0) return;
+      var t = lines[k].split('-->');
+      cues.push({ startTime: ts(t[0]), endTime: ts(t[1].trim().split(/\s/)[0]), text: lines.slice(k + 1).join('\n') });
+    });
+    return cues;
+  }
+  var fakeTrack = { mode: 'hidden', cues: [], kind: 'subtitles' }, trackSrc = '';
+  document.addEventListener('DOMContentLoaded', function () {
+    var mt = document.getElementById('mainTrack');
+    if (!mt) return;
+    Object.defineProperty(mt, 'track', { get: function () { return fakeTrack; }, configurable: true });
+    Object.defineProperty(mt, 'src', { get: function () { return trackSrc; }, set: function (u) { trackSrc = String(u || ''); }, configurable: true });
+    mt.removeAttribute = function (k) { if (k === 'src') { trackSrc = ''; fakeTrack.cues = []; } };
+  });
+  window.astraSetSubs = function (url) {
+    trackSrc = url; fakeTrack.cues = [];
+    return fetch(url).then(function (r) {
+      if (!r.ok) throw new Error('sub ' + r.status);
+      return r.text();
+    }).then(function (t) { fakeTrack.cues = parseVtt(t); });
+  };
+
+  /* ---- equalizer and filters go to the native player ---- */
+  window.astraNativeFx = function (o) { try { N.fx(JSON.stringify(o)); } catch (e) {} };
+  window.astraNativeFilters = function (b, c, s, h, w) { try { N.filters(+b, +c, +s, +h, +w); } catch (e) {} };
+  window.astraNativeAudio = function (n) { try { N.audioTrack(n | 0); } catch (e) {} };
+
+  /* ---- transparent page while a video plays, so the native picture shows through ---- */
+  var st = document.createElement('style');
+  st.textContent = '.astra-clear{background:transparent!important;background-image:none!important}html.astra-native #glCanvas{display:none!important}';
+  document.addEventListener('DOMContentLoaded', function () { document.documentElement.classList.add('astra-native'); document.head.appendChild(st); });
+  function clear(on) {
+    var e = document.getElementById('playerWrapper');
+    while (e) { e.classList.toggle('astra-clear', on); e = e.parentElement; }
+  }
+
+  /* ---- a stand-in for the <video> element, backed by the native player ---- */
+  window.astraMakeVideo = function (real) {
+    var et = new EventTarget(), v = {}, S = { t: 0, d: NaN, b: 0, w: 0, h: 0, paused: true, ended: false, rate: 1, vol: 1, muted: false, seeking: false, src: '', ready: 0 };
+    var dummy = document.createElement('div');
+    function emit(n) {
+      var e = new Event(n); et.dispatchEvent(e);
+      if (typeof v['on' + n] === 'function') { try { v['on' + n](e); } catch (x) { console.error(x); } }
+    }
+    function def(k, g, s) { Object.defineProperty(v, k, { get: g, set: s, enumerable: true, configurable: true }); }
+    ['addEventListener', 'removeEventListener', 'dispatchEvent'].forEach(function (k) { v[k] = et[k].bind(et); });
+    def('currentTime', function () { return S.t; }, function (x) { x = Number(x) || 0; S.t = x; S.seeking = true; N.seek(x); emit('seeking'); });
+    def('duration', function () { return S.d; });
+    def('paused', function () { return S.paused; });
+    def('ended', function () { return S.ended; });
+    def('seeking', function () { return S.seeking; });
+    def('readyState', function () { return S.ready; });
+    def('videoWidth', function () { return S.w; });
+    def('videoHeight', function () { return S.h; });
+    def('volume', function () { return S.vol; }, function (x) { S.vol = Math.max(0, Math.min(1, Number(x))); N.volume(S.muted ? 0 : S.vol); emit('volumechange'); });
+    def('muted', function () { return S.muted; }, function (x) { S.muted = !!x; N.volume(S.muted ? 0 : S.vol); emit('volumechange'); });
+    def('playbackRate', function () { return S.rate; }, function (x) { S.rate = Number(x) || 1; N.speed(S.rate); emit('ratechange'); });
+    def('defaultPlaybackRate', function () { return 1; }, function () {});
+    function ranges(end) { return { length: end > 0 ? 1 : 0, start: function () { return 0; }, end: function () { return end; } }; }
+    def('buffered', function () { return ranges(S.b); });
+    def('seekable', function () { return ranges(S.d > 0 ? S.d : S.b); });
+    def('style', function () { return dummy.style; });
+    def('classList', function () { return dummy.classList; });
+    def('parentElement', function () { return real.parentElement; });
+    def('src', function () { return S.src; }, function (u) {
+      S.src = String(u || ''); S.t = 0; S.d = NaN; S.ended = false; S.ready = 0;
+      var m = /[?&]file=([^&]*)/.exec(S.src);
+      if (S.src.indexOf('/stream?') >= 0 && m) { var am = (typeof activeAudioStreamIndex === 'string') ? /^0:a:(\d+)$/.exec(activeAudioStreamIndex) : null;
+        clear(true); N.play(decodeURIComponent(m[1]), am ? +am[1] : 0); emit('loadstart'); }
+      else if (S.src) { emit('error'); }
+    });
+    v.removeAttribute = function (k) { if (k === 'src') S.src = ''; };
+    v.getAttribute = function (k) { return k === 'src' ? (S.src || null) : real.getAttribute(k); };
+    v.load = function () { if (!S.src) { N.stop(); clear(false); S.paused = true; } };
+    v.play = function () { N.resume(); return Promise.resolve(); };
+    v.pause = function () { N.pause(); };
+    v.getVideoPlaybackQuality = function () { return { totalVideoFrames: 0, droppedVideoFrames: 0 }; };
+
+    function merge(o) {
+      if (!o) return;
+      if (typeof o.t === 'number' && !S.seeking) S.t = o.t;
+      if (o.d > 0) S.d = o.d;
+      if (typeof o.b === 'number') S.b = o.b;
+      if (o.w) S.w = o.w;
+      if (o.h) S.h = o.h;
+      if (typeof o.paused === 'boolean') S.paused = o.paused;
+      S.ended = !!o.ended;
+    }
+    window.__astraState = function (o) { merge(o); emit('timeupdate'); emit('progress'); };
+    window.__astraEvt = function (n, o) {
+      merge(o);
+      if (n === 'seeked') { S.seeking = false; if (o && typeof o.t === 'number') S.t = o.t; }
+      if (n === 'loadedmetadata') { S.ready = 4; emit('loadedmetadata'); emit('durationchange'); emit('canplay'); return; }
+      if (n === 'canplay') { S.ready = 4; S.seeking = false; }
+      if (n === 'resize') { emit('resize'); return; }
+      emit(n);
+      if (n === 'timeupdate') return;
+      emit('timeupdate');
+    };
+    return v;
+  };
+})();

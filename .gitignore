@@ -1,0 +1,14 @@
+node_modules/
+# your data and generated files (never commit these)
+cache/
+subtitles/
+users/
+models/
+config.json
+history.json
+profile.json
+chapters_map.json
+app.log
+start.sh
+*.log
+.DS_Store
