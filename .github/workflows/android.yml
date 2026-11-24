@@ -1,0 +1,36 @@
+name: Build Android app
+on:
+  workflow_dispatch:
+  push:
+    paths: ['android/**', 'public/**', '.github/workflows/android.yml']
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: '8.11.1' }
+      - name: Build APK
+        working-directory: android
+        run: gradle :app:assembleRelease --no-daemon --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: astra-player-apk
+          path: android/app/build/outputs/apk/release/*.apk
+      - name: Publish release (stable tag, used by the in-app update check)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(grep -m1 versionName android/app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')
+          cp android/app/build/outputs/apk/release/*.apk "astra-player-app-v$V.apk"
+          awk -v v="$V" '$0 ~ "^## "v" " {f=1; next} /^## / {f=0} f' CHANGELOG.md > notes.md || true
+          [ -s notes.md ] || echo "Astra Player $V" > notes.md
+          if gh release view "v$V" >/dev/null 2>&1; then
+            gh release upload "v$V" "astra-player-app-v$V.apk" --clobber
+          else
+            gh release create "v$V" "astra-player-app-v$V.apk" --title "Astra Player $V" --notes-file notes.md --target "$GITHUB_SHA"
+          fi
