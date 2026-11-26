@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut android:shortcutId="resume" android:enabled="true" android:icon="@mipmap/ic_launcher" android:shortcutShortLabel="@string/sc_resume" android:shortcutLongLabel="@string/sc_resume_long">
+        <intent android:action="com.astracore.astraplayer.GO" android:targetPackage="com.astracore.astraplayer" android:targetClass="com.astracore.astraplayer.MainActivity">
+            <extra android:name="go" android:value="resume" />
+        </intent>
+    </shortcut>
+    <shortcut android:shortcutId="files" android:enabled="true" android:icon="@mipmap/ic_launcher" android:shortcutShortLabel="@string/sc_files" android:shortcutLongLabel="@string/sc_files">
+        <intent android:action="com.astracore.astraplayer.GO" android:targetPackage="com.astracore.astraplayer" android:targetClass="com.astracore.astraplayer.MainActivity">
+            <extra android:name="go" android:value="files" />
+        </intent>
+    </shortcut>
+    <shortcut android:shortcutId="tasks" android:enabled="true" android:icon="@mipmap/ic_launcher" android:shortcutShortLabel="@string/sc_tasks" android:shortcutLongLabel="@string/sc_tasks">
+        <intent android:action="com.astracore.astraplayer.GO" android:targetPackage="com.astracore.astraplayer" android:targetClass="com.astracore.astraplayer.MainActivity">
+            <extra android:name="go" android:value="tasks" />
+        </intent>
+    </shortcut>
+</shortcuts>
