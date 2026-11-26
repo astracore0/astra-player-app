@@ -1,0 +1,49 @@
+name: Build Android app
+on:
+  workflow_dispatch:
+  push:
+    paths: ['android/**', 'public/**', '.github/workflows/android.yml']
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: '8.11.1' }
+      - name: Fetch whisper.cpp (optional, for the Whisper engine)
+        run: git clone --depth 1 --branch v1.7.2 https://github.com/ggerganov/whisper.cpp android/app/src/main/cpp/whisper.cpp || echo "whisper.cpp not fetched"
+      - name: Build APK (with Whisper, falls back to a build without it)
+        working-directory: android
+        run: |
+          set -o pipefail
+          if [ -f app/src/main/cpp/whisper.cpp/CMakeLists.txt ] && gradle :app:assembleRelease -PwithWhisper --no-daemon --stacktrace 2>&1 | tee build-whisper.log; then
+            echo "Built with the Whisper engine"
+          else
+            echo "::warning::The Whisper engine could not be built, building without it"
+            if ! gradle :app:clean :app:assembleRelease --no-daemon --stacktrace 2>&1 | tee build.log; then
+              # Show the real reason as red annotations on the run page
+              grep -E "^e: |error:|What went wrong|Execution failed|FAILED" -A2 build.log | head -40 | while IFS= read -r l; do echo "::error::$l"; done
+              exit 1
+            fi
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: astra-player-apk
+          path: android/app/build/outputs/apk/release/*.apk
+      - name: Publish release (stable tag, used by the in-app update check)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(grep -m1 versionName android/app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')
+          cp android/app/build/outputs/apk/release/*.apk "astra-player-app-v$V.apk"
+          awk -v v="$V" '$0 ~ "^## "v" " {f=1; next} /^## / {f=0} f' CHANGELOG.md > notes.md || true
+          [ -s notes.md ] || echo "Astra Player $V" > notes.md
+          if gh release view "v$V" >/dev/null 2>&1; then
+            gh release upload "v$V" "astra-player-app-v$V.apk" --clobber
+          else
+            gh release create "v$V" "astra-player-app-v$V.apk" --title "Astra Player $V" --notes-file notes.md --target "$GITHUB_SHA"
+          fi
