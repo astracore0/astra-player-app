@@ -1,0 +1,65 @@
+name: Build Android app
+on:
+  workflow_dispatch:
+  push:
+    paths: ['android/**', 'public/**', '.github/workflows/android.yml']
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: '8.11.1' }
+      - name: Fetch whisper.cpp (optional, for the Whisper engine)
+        run: git clone --depth 1 --branch v1.7.2 https://github.com/ggerganov/whisper.cpp android/app/src/main/cpp/whisper.cpp || echo "whisper.cpp not fetched"
+      - name: Build APKs (arm32, arm64, universal; Whisper with fallback)
+        working-directory: android
+        run: |
+          set -o pipefail
+          V=$(grep -m1 versionName app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')
+          mkdir -p ../dist
+          build_one() {
+            ABI="$1"; SUF="$2"; P=""
+            [ "$ABI" != "all" ] && P="-PonlyAbi=$ABI"
+            rm -rf app/build/outputs/apk/release
+            if [ -f app/src/main/cpp/whisper.cpp/CMakeLists.txt ] && gradle :app:assembleRelease -PwithWhisper $P --no-daemon --stacktrace 2>&1 | tee "build-$SUF-whisper.log"; then
+              echo "Built $SUF with the Whisper engine"
+            else
+              echo "::warning::The Whisper engine could not be built for $SUF, building without it"
+              if ! gradle :app:clean :app:assembleRelease $P --no-daemon --stacktrace 2>&1 | tee "build-$SUF.log"; then
+                grep -E "^e: |error:|What went wrong|Execution failed|FAILED" -A2 "build-$SUF.log" | head -40 | while IFS= read -r l; do echo "::error::$l"; done
+                exit 1
+              fi
+            fi
+            cp app/build/outputs/apk/release/*.apk "../dist/astra-player-app-v$V-$SUF.apk"
+          }
+          build_one armeabi-v7a arm32
+          build_one arm64-v8a arm64
+          build_one all universal
+      - uses: actions/upload-artifact@v4
+        with:
+          name: astra-player-apk
+          path: dist/*.apk
+      - name: Publish release (stable tag, used by the in-app update check)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(grep -m1 versionName android/app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')
+          awk -v v="$V" '$0 ~ "^## "v" " {f=1; next} /^## / {f=0} f' CHANGELOG.md > notes.md || true
+          [ -s notes.md ] || echo "Astra Player $V" > notes.md
+          # 2.10.38 = stable. 2.10.38-beta.1 / -alpha.1 / -experiment.1 are published as pre-releases (shown only to people on that update channel)
+          PRE=""; CH="Stable"
+          case "$V" in
+            *experiment*|*exp*) PRE="--prerelease"; CH="Experimental" ;;
+            *alpha*) PRE="--prerelease"; CH="Alpha" ;;
+            *beta*|*rc*) PRE="--prerelease"; CH="Beta" ;;
+          esac
+          if gh release view "v$V" >/dev/null 2>&1; then
+            gh release upload "v$V" dist/*.apk --clobber
+          else
+            gh release create "v$V" dist/*.apk --title "Astra Player $V ($CH)" --notes-file notes.md --target "$GITHUB_SHA" $PRE
+          fi
