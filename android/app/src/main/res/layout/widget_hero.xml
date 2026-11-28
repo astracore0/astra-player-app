@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/h_root" android:layout_width="match_parent" android:layout_height="match_parent"
+    android:background="@drawable/widget_bg">
+    <ImageView android:id="@+id/h_cover" android:layout_width="match_parent" android:layout_height="match_parent"
+        android:scaleType="centerCrop" android:src="@drawable/widget_cover_empty" android:contentDescription="Cover" />
+    <FrameLayout android:layout_width="match_parent" android:layout_height="match_parent" android:background="@drawable/widget_scrim" />
+    <LinearLayout android:layout_width="match_parent" android:layout_height="match_parent"
+        android:orientation="vertical" android:gravity="bottom" android:padding="16dp">
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="CONTINUE WATCHING"
+            android:textColor="#93C5FD" android:textSize="10sp" android:textStyle="bold" android:letterSpacing="0.1" />
+        <TextView android:id="@+id/h_title" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="3dp" android:text="Nothing watched yet" android:textColor="#FFFFFF" android:textSize="18sp"
+            android:textStyle="bold" android:maxLines="2" android:ellipsize="end" />
+        <TextView android:id="@+id/h_sub" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="2dp" android:text="Open Astra Player" android:textColor="#CBD5E1" android:textSize="12sp" android:maxLines="1" />
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="10dp" android:orientation="horizontal" android:gravity="center_vertical">
+            <ProgressBar android:id="@+id/h_bar" style="?android:attr/progressBarStyleHorizontal" android:layout_width="0dp"
+                android:layout_weight="1" android:layout_height="4dp" android:max="100" android:progress="0"
+                android:progressTint="#3B82F6" android:progressBackgroundTint="#40FFFFFF" />
+            <TextView android:id="@+id/h_btn" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:layout_marginStart="14dp" android:paddingStart="16dp" android:paddingEnd="16dp"
+                android:paddingTop="7dp" android:paddingBottom="7dp" android:text="▶  Resume"
+                android:textColor="#FFFFFF" android:textSize="13sp" android:textStyle="bold" android:background="@drawable/widget_btn" />
+        </LinearLayout>
+    </LinearLayout>
+</FrameLayout>

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/q_root" android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="horizontal" android:gravity="center" android:padding="8dp"
+    android:background="@drawable/widget_bg">
+    <LinearLayout android:id="@+id/q_resume" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical" android:gravity="center">
+        <ImageView android:layout_width="44dp" android:layout_height="44dp" android:padding="11dp" android:src="@drawable/ic_w_play" android:background="@drawable/widget_chip" android:contentDescription="Resume" />
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="5dp" android:text="Resume" android:textColor="#E2E8F0" android:textSize="11sp" />
+    </LinearLayout>
+    <LinearLayout android:id="@+id/q_files" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical" android:gravity="center">
+        <ImageView android:layout_width="44dp" android:layout_height="44dp" android:padding="11dp" android:src="@drawable/ic_w_folder" android:background="@drawable/widget_chip" android:contentDescription="Files" />
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="5dp" android:text="Files" android:textColor="#E2E8F0" android:textSize="11sp" />
+    </LinearLayout>
+    <LinearLayout android:id="@+id/q_tasks" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical" android:gravity="center">
+        <ImageView android:layout_width="44dp" android:layout_height="44dp" android:padding="11dp" android:src="@drawable/ic_w_check" android:background="@drawable/widget_chip" android:contentDescription="Tasks" />
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="5dp" android:text="Tasks" android:textColor="#E2E8F0" android:textSize="11sp" />
+    </LinearLayout>
+    <LinearLayout android:id="@+id/q_home" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical" android:gravity="center">
+        <ImageView android:layout_width="44dp" android:layout_height="44dp" android:padding="11dp" android:src="@drawable/ic_w_home" android:background="@drawable/widget_chip" android:contentDescription="Home" />
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="5dp" android:text="Home" android:textColor="#E2E8F0" android:textSize="11sp" />
+    </LinearLayout>
+</LinearLayout>

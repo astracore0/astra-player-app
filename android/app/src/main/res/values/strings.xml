@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">Astra Player</string>
+    <string name="sc_resume">Resume</string>
+    <string name="sc_resume_long">Continue watching</string>
+    <string name="sc_files">Files</string>
+    <string name="sc_tasks">Tasks</string>
+    <string name="wd_continue">Last watched video with its cover and progress. Tap to resume.</string>
+    <string name="wd_hero">Big banner with the cover of your last video and a Resume button.</string>
+    <string name="wd_quick">Shortcuts: Resume, Files, Tasks and Home.</string>
+    <string name="wd_stats">Watch time today, your streak and the last 7 days.</string>
+</resources>
